@@ -4,17 +4,18 @@ import type {
   HeadersFunction,
   LoaderFunctionArgs,
 } from "react-router";
-import { useFetcher } from "react-router";
+import { useFetcher, useLoaderData } from "react-router";
 
 import { authenticate } from "../shopify.server";
 import { boundary } from "@shopify/shopify-app-react-router/server";
-
-type TallyItem = {
-  sku: string;
-  name: string;
-  variant?: string;
-  quantity: number;
-};
+import {
+  buildOrderRangeQuery,
+  fetchAllOrders,
+  fetchShopTimezone,
+  type IncludedOrder,
+  type ShopTimezone,
+} from "../orders.server";
+import { tallyOrders, type TallyItem } from "../tally.server";
 
 type TallyResponse = {
   success?: boolean;
@@ -27,159 +28,45 @@ type TallyResponse = {
   totalItems?: number;
 };
 
-const dummyCoffeeProducts: TallyItem[] = [
-  {
-    sku: "B-CHM-1KG",
-    name: "Champion",
-    variant: "1kg",
-    quantity: 2,
-  },
-  {
-    sku: "B-ETH-250F",
-    name: "Ethiopia Sidamo",
-    variant: "250g",
-    quantity: 12,
-  },
-  {
-    sku: "B-ETH-1KGF",
-    name: "Ethiopia Sidamo",
-    variant: "1kg",
-    quantity: 8,
-  },
-  {
-    sku: "B-COL-250E",
-    name: "Colombia Supremo",
-    variant: "250g",
-    quantity: 10,
-  },
-  {
-    sku: "B-COL-1KGF",
-    name: "Colombia Supremo",
-    variant: "1kg",
-    quantity: 6,
-  },
-];
+type OrdersListResponse = {
+  success?: boolean;
+  error?: string;
+  orders?: IncludedOrder[];
+};
 
-const dummyAccessories: TallyItem[] = [
-  {
-    sku: "ACC-CAN-88-1KG-BLK",
-    name: "Airscape Kilo Canister – 8” Large",
-    variant: "1kg (Black)",
-    quantity: 1,
-  },
-  {
-    sku: "ACC-MUG-350-BLK",
-    name: "Ceramic Mug",
-    variant: "Black, 350ml",
-    quantity: 10,
-  },
-  {
-    sku: "ACC-MUG-350-WHT",
-    name: "Ceramic Mug",
-    variant: "White, 350ml",
-    quantity: 6,
-  },
-  {
-    sku: "ACC-JUG-600-SS",
-    name: "Milk Jug",
-    variant: "Stainless Steel, 600ml",
-    quantity: 3,
-  },
-  {
-    sku: "ACC-TAMP-58",
-    name: "Coffee Tamper",
-    variant: "58mm Flat Base",
-    quantity: 2,
-  },
-];
+function formatYmdInTimeZone(date: Date, timeZone: string) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
 
-function convertGMT8ToUTC(date: string, time: string) {
-  const dateTime = `${date}T${time}:00+08:00`;
-  return new Date(dateTime).toISOString();
+  const value = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((part) => part.type === type)?.value || "";
+
+  return `${value("year")}-${value("month")}-${value("day")}`;
 }
 
-async function fetchAllOrders(
-  admin: any,
-  orderQuery: string,
-): Promise<any[]> {
-  const orders: any[] = [];
-  let hasNextPage = true;
-  let after: string | null = null;
+function shiftYmd(dateStr: string, days: number) {
+  const [year, month, day] = dateStr.split("-").map(Number);
+  const shifted = new Date(Date.UTC(year, month - 1, day + days, 12, 0, 0));
 
-  while (hasNextPage) {
-    const response = await admin.graphql(
-      `#graphql
-        query GetOrders(
-          $first: Int!
-          $after: String
-          $query: String!
-        ) {
-          orders(
-            first: $first
-            after: $after
-            query: $query
-            sortKey: CREATED_AT
-          ) {
-            nodes {
-              id
-              name
-              createdAt
+  return [
+    shifted.getUTCFullYear(),
+    String(shifted.getUTCMonth() + 1).padStart(2, "0"),
+    String(shifted.getUTCDate()).padStart(2, "0"),
+  ].join("-");
+}
 
-              lineItems(first: 250) {
-                nodes {
-                  title
-                  name
-                  quantity
-                  sku
-                  variantTitle
-                }
-                pageInfo {
-                  hasNextPage
-                  endCursor
-                }
-              }
-            }
-
-            pageInfo {
-              hasNextPage
-              endCursor
-            }
-          }
-        }`,
-      {
-        variables: {
-          first: 100,
-          after,
-          query: orderQuery,
-        },
-      },
-    );
-
-    const data = await response.json();
-
-    if (data.errors) {
-      throw new Error(data.errors[0]?.message || "Shopify API error");
-    }
-
-    const orderData = data.data?.orders;
-
-    if (!orderData) {
-      break;
-    }
-
-    orders.push(...orderData.nodes);
-
-    hasNextPage = orderData.pageInfo.hasNextPage;
-    after = orderData.pageInfo.endCursor;
-  }
-
-  return orders;
+function formatTimezoneLabel(shop: Pick<ShopTimezone, "timezoneAbbreviation" | "timezoneOffset">) {
+  return `${shop.timezoneAbbreviation} ${shop.timezoneOffset}`;
 }
 
 export async function loader({ request }: LoaderFunctionArgs) {
-  await authenticate.admin(request);
+  const { admin } = await authenticate.admin(request);
 
-  return null;
+  return fetchShopTimezone(admin);
 }
 
 export async function action({ request }: ActionFunctionArgs) {
@@ -200,49 +87,17 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   try {
-    const fromUTC = convertGMT8ToUTC(fromDate, fromTime);
-    const toUTC = convertGMT8ToUTC(toDate, toTime);
-
-    const orderQuery = `created_at:>='${fromUTC}' created_at:<='${toUTC}'`;
+    const shop = await fetchShopTimezone(admin);
+    const orderQuery = buildOrderRangeQuery(
+      fromDate,
+      fromTime,
+      toDate,
+      toTime,
+      shop.ianaTimezone,
+    );
 
     const orders = await fetchAllOrders(admin, orderQuery);
-
-    const coffeeMap = new Map<string, TallyItem>();
-    const accessoryMap = new Map<string, TallyItem>();
-
-    for (const order of orders) {
-      for (const lineItem of order.lineItems.nodes) {
-        const sku = lineItem.sku || "NO-SKU";
-
-        const item: TallyItem = {
-          sku,
-          name: lineItem.title || lineItem.name || "Unnamed Product",
-          variant: lineItem.variantTitle || "",
-          quantity: lineItem.quantity || 0,
-        };
-
-        if (sku.startsWith("ACC-")) {
-          const existing = accessoryMap.get(sku);
-
-          if (existing) {
-            existing.quantity += item.quantity;
-          } else {
-            accessoryMap.set(sku, item);
-          }
-        } else {
-          const existing = coffeeMap.get(sku);
-
-          if (existing) {
-            existing.quantity += item.quantity;
-          } else {
-            coffeeMap.set(sku, item);
-          }
-        }
-      }
-    }
-
-    const coffeeProducts = Array.from(coffeeMap.values());
-    const accessories = Array.from(accessoryMap.values());
+    const { coffeeProducts, accessories } = tallyOrders(orders);
 
     const totalCoffeeItems = coffeeProducts.reduce(
       (sum, item) => sum + item.quantity,
@@ -281,18 +136,22 @@ export const headers: HeadersFunction = (headersArgs) => {
 };
 
 export default function Index() {
+  const shop = useLoaderData<typeof loader>();
   const fetcher = useFetcher<TallyResponse>();
+  const ordersFetcher = useFetcher<OrdersListResponse>();
 
-  const [fromDate, setFromDate] = useState("2025-05-20");
+  const ianaTimezone = shop.ianaTimezone || "UTC";
+  const timezoneLabel = formatTimezoneLabel(shop);
+  const storeToday = formatYmdInTimeZone(new Date(), ianaTimezone);
+
+  const [fromDate, setFromDate] = useState(storeToday);
   const [fromTime, setFromTime] = useState("00:00");
-  const [toDate, setToDate] = useState("2025-05-20");
+  const [toDate, setToDate] = useState(storeToday);
   const [toTime, setToTime] = useState("23:59");
+  const [isOrdersModalOpen, setIsOrdersModalOpen] = useState(false);
 
-  const [coffeeProducts, setCoffeeProducts] =
-    useState<TallyItem[]>(dummyCoffeeProducts);
-
-  const [accessories, setAccessories] =
-    useState<TallyItem[]>(dummyAccessories);
+  const coffeeProducts = fetcher.data?.coffeeProducts ?? [];
+  const accessories = fetcher.data?.accessories ?? [];
 
   const totalCoffeeItems = coffeeProducts.reduce(
     (sum, item) => sum + item.quantity,
@@ -316,71 +175,78 @@ export default function Index() {
     });
   };
 
-  const handleQuickSelect = (type: string) => {
-    const today = new Date();
-
-    const formatInputDate = (date: Date) => {
-      const year = date.getFullYear();
-      const month = String(date.getMonth() + 1).padStart(2, "0");
-      const day = String(date.getDate()).padStart(2, "0");
-
-      return `${year}-${month}-${day}`;
-    };
+  const getQuickSelectRange = (type: string) => {
+    const today = formatYmdInTimeZone(new Date(), ianaTimezone);
 
     if (type === "today") {
-      const date = formatInputDate(today);
-
-      setFromDate(date);
-      setToDate(date);
-      setFromTime("00:00");
-      setToTime("23:59");
+      return { fromDate: today, toDate: today, fromTime: "00:00", toTime: "23:59" };
     }
 
     if (type === "yesterday") {
-      const yesterday = new Date(today);
-      yesterday.setDate(today.getDate() - 1);
+      const yesterday = shiftYmd(today, -1);
 
-      const date = formatInputDate(yesterday);
-
-      setFromDate(date);
-      setToDate(date);
-      setFromTime("00:00");
-      setToTime("23:59");
+      return {
+        fromDate: yesterday,
+        toDate: yesterday,
+        fromTime: "00:00",
+        toTime: "23:59",
+      };
     }
 
     if (type === "last7") {
-      const start = new Date(today);
-      start.setDate(today.getDate() - 6);
-
-      setFromDate(formatInputDate(start));
-      setToDate(formatInputDate(today));
-      setFromTime("00:00");
-      setToTime("23:59");
+      return {
+        fromDate: shiftYmd(today, -6),
+        toDate: today,
+        fromTime: "00:00",
+        toTime: "23:59",
+      };
     }
 
     if (type === "last30") {
-      const start = new Date(today);
-      start.setDate(today.getDate() - 29);
-
-      setFromDate(formatInputDate(start));
-      setToDate(formatInputDate(today));
-      setFromTime("00:00");
-      setToTime("23:59");
+      return {
+        fromDate: shiftYmd(today, -29),
+        toDate: today,
+        fromTime: "00:00",
+        toTime: "23:59",
+      };
     }
 
     if (type === "thisMonth") {
-      const start = new Date(
-        today.getFullYear(),
-        today.getMonth(),
-        1,
-      );
-
-      setFromDate(formatInputDate(start));
-      setToDate(formatInputDate(today));
-      setFromTime("00:00");
-      setToTime("23:59");
+      return {
+        fromDate: `${today.slice(0, 8)}01`,
+        toDate: today,
+        fromTime: "00:00",
+        toTime: "23:59",
+      };
     }
+
+    return null;
   };
+
+  const handleQuickSelect = (type: string) => {
+    const range = getQuickSelectRange(type);
+
+    if (!range) return;
+
+    setFromDate(range.fromDate);
+    setFromTime(range.fromTime);
+    setToDate(range.toDate);
+    setToTime(range.toTime);
+  };
+
+  const activeQuickSelect = (
+    ["today", "yesterday", "last7", "last30", "thisMonth"] as const
+  ).find((type) => {
+    const range = getQuickSelectRange(type);
+
+    return (
+      range &&
+      range.fromDate === fromDate &&
+      range.fromTime === fromTime &&
+      range.toDate === toDate &&
+      range.toTime === toTime
+    );
+  });
 
   const generateTally = () => {
     fetcher.submit(
@@ -396,7 +262,99 @@ export default function Index() {
     );
   };
 
+  const openIncludedOrders = () => {
+    setIsOrdersModalOpen(true);
+
+    const params = new URLSearchParams({
+      fromDate,
+      fromTime,
+      toDate,
+      toTime,
+    });
+
+    ordersFetcher.load(`/app/included-orders?${params.toString()}`);
+  };
+
+  const formatOrderDateTime = (isoDate: string) => {
+    return new Date(isoDate).toLocaleString("en-US", {
+      timeZone: ianaTimezone,
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+    });
+  };
+
   const isGenerating = fetcher.state !== "idle";
+  const isLoadingOrders = ordersFetcher.state !== "idle";
+  const includedOrders = ordersFetcher.data?.orders ?? [];
+
+  const csvCell = (value: string | number) => {
+    const text = String(value ?? "");
+
+    if (/[",\n\r]/.test(text)) {
+      return `"${text.replace(/"/g, '""')}"`;
+    }
+
+    return text;
+  };
+
+  const downloadCsv = (filename: string, headers: string[], rows: Array<Array<string | number>>) => {
+    const lines = [
+      headers.map(csvCell).join(","),
+      ...rows.map((row) => row.map(csvCell).join(",")),
+    ];
+    const csv = `\uFEFF${lines.join("\r\n")}`;
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const rangeLabel = `${fromDate}_${fromTime.replace(":", "")}-to-${toDate}_${toTime.replace(":", "")}`;
+
+  const downloadCoffeeCsv = () => {
+    if (coffeeProducts.length === 0) return;
+
+    downloadCsv(
+      `bean-packing-team-${rangeLabel}.csv`,
+      ["SKU", "Product Name", "Variant", "Quantity"],
+      [
+        ...coffeeProducts.map((item) => [
+          item.sku || "",
+          item.name,
+          item.variant || "",
+          item.quantity,
+        ]),
+        ["", "", "Total Coffee Items", totalCoffeeItems],
+      ],
+    );
+  };
+
+  const downloadAccessoriesCsv = () => {
+    if (accessories.length === 0) return;
+
+    downloadCsv(
+      `bar-staff-${rangeLabel}.csv`,
+      ["SKU", "Item Name", "Quantity"],
+      [
+        ...accessories.map((item) => [
+          item.sku || "",
+          item.variant ? `${item.name} – ${item.variant}` : item.name,
+          item.quantity,
+        ]),
+        ["", "Total Accessory Items", totalAccessoryItems],
+      ],
+    );
+  };
 
   return (
     <>
@@ -417,7 +375,8 @@ export default function Index() {
                     </s-heading>
 
                     <s-text>
-                      Pull orders based on the order created date and time.
+                      Pull orders based on the order date and time shown in
+                      Shopify admin, in the store timezone ({timezoneLabel}).
                     </s-text>
                   </s-stack>
 
@@ -490,54 +449,56 @@ export default function Index() {
 
                           <button
                             type="button"
-                            onClick={() =>
-                              handleQuickSelect("today")
+                            className={
+                              activeQuickSelect === "today" ? "is-active" : ""
                             }
+                            onClick={() => handleQuickSelect("today")}
                           >
                             Today
                           </button>
 
                           <button
                             type="button"
-                            onClick={() =>
-                              handleQuickSelect("yesterday")
+                            className={
+                              activeQuickSelect === "yesterday"
+                                ? "is-active"
+                                : ""
                             }
+                            onClick={() => handleQuickSelect("yesterday")}
                           >
                             Yesterday
                           </button>
 
                           <button
                             type="button"
-                            onClick={() =>
-                              handleQuickSelect("last7")
+                            className={
+                              activeQuickSelect === "last7" ? "is-active" : ""
                             }
+                            onClick={() => handleQuickSelect("last7")}
                           >
                             Last 7 Days
                           </button>
 
                           <button
                             type="button"
-                            onClick={() =>
-                              handleQuickSelect("last30")
+                            className={
+                              activeQuickSelect === "last30" ? "is-active" : ""
                             }
+                            onClick={() => handleQuickSelect("last30")}
                           >
                             Last 30 Days
                           </button>
 
                           <button
                             type="button"
-                            onClick={() =>
-                              handleQuickSelect("thisMonth")
+                            className={
+                              activeQuickSelect === "thisMonth"
+                                ? "is-active"
+                                : ""
                             }
+                            onClick={() => handleQuickSelect("thisMonth")}
                           >
                             This Month
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => {}}
-                          >
-                            Custom Range
                           </button>
 
                         </div>
@@ -575,6 +536,17 @@ export default function Index() {
                           {isGenerating
                             ? "Generating..."
                             : "Generate Product Tally"}
+                        </button>
+
+                        <button
+                          type="button"
+                          className="included-orders-link"
+                          onClick={openIncludedOrders}
+                          disabled={isLoadingOrders}
+                        >
+                          {isLoadingOrders
+                            ? "Loading included orders..."
+                            : "View included orders"}
                         </button>
 
                       </div>
@@ -638,29 +610,32 @@ export default function Index() {
                         </thead>
 
                         <tbody>
-
-                          {coffeeProducts.map((item) => (
-                            <tr key={item.sku}>
-
-                              <td>
-                                {item.sku}
+                          {isGenerating ? (
+                            <tr>
+                              <td colSpan={4} className="preview-empty">
+                                Loading coffee products from orders...
                               </td>
-
-                              <td>
-                                {item.name}
-                              </td>
-
-                              <td>
-                                {item.variant}
-                              </td>
-
-                              <td>
-                                {item.quantity}
-                              </td>
-
                             </tr>
-                          ))}
-
+                          ) : coffeeProducts.length === 0 ? (
+                            <tr>
+                              <td colSpan={4} className="preview-empty">
+                                {fetcher.data?.success
+                                  ? "No coffee products in this order range."
+                                  : "Generate a product tally to preview coffee items."}
+                              </td>
+                            </tr>
+                          ) : (
+                            coffeeProducts.map((item) => (
+                              <tr
+                                key={`${item.sku}-${item.name}-${item.variant}`}
+                              >
+                                <td>{item.sku || "—"}</td>
+                                <td>{item.name}</td>
+                                <td>{item.variant}</td>
+                                <td>{item.quantity}</td>
+                              </tr>
+                            ))
+                          )}
                         </tbody>
 
                       </table>
@@ -707,26 +682,34 @@ export default function Index() {
 
                         <tbody>
 
-                          {accessories.map((item) => (
-                            <tr key={item.sku}>
-
-                              <td>
-                                {item.sku}
+                          {isGenerating ? (
+                            <tr>
+                              <td colSpan={3} className="preview-empty">
+                                Loading accessories from orders...
                               </td>
-
-                              <td>
-                                {item.name}
-                                {item.variant
-                                  ? ` – ${item.variant}`
-                                  : ""}
-                              </td>
-
-                              <td>
-                                {item.quantity}
-                              </td>
-
                             </tr>
-                          ))}
+                          ) : accessories.length === 0 ? (
+                            <tr>
+                              <td colSpan={3} className="preview-empty">
+                                {fetcher.data?.success
+                                  ? "No accessories in this order range."
+                                  : "Generate a product tally to preview accessories."}
+                              </td>
+                            </tr>
+                          ) : (
+                            accessories.map((item) => (
+                              <tr
+                                key={`${item.sku}-${item.name}-${item.variant}`}
+                              >
+                                <td>{item.sku || "—"}</td>
+                                <td>
+                                  {item.name}
+                                  {item.variant ? ` – ${item.variant}` : ""}
+                                </td>
+                                <td>{item.quantity}</td>
+                              </tr>
+                            ))
+                          )}
 
                         </tbody>
 
@@ -763,7 +746,7 @@ export default function Index() {
                     </div>
 
                     <div className="generate-print-description">
-                      Generate the tally and print packing sheets for your teams.
+                      Download CSV packing sheets that match the preview above.
                     </div>
 
                   </div>
@@ -773,6 +756,8 @@ export default function Index() {
                     <button
                       type="button"
                       className="print-button"
+                      onClick={downloadCoffeeCsv}
+                      disabled={isGenerating || coffeeProducts.length === 0}
                     >
 
                       <span className="print-icon print-icon-box">
@@ -810,6 +795,8 @@ export default function Index() {
                     <button
                       type="button"
                       className="print-button"
+                      onClick={downloadAccessoriesCsv}
+                      disabled={isGenerating || accessories.length === 0}
                     >
 
                       <span className="print-icon">
@@ -890,7 +877,7 @@ export default function Index() {
                     </div>
 
                     <div className="timezone">
-                      (GMT+8)
+                      ({timezoneLabel})
                     </div>
 
                   </div>
@@ -960,6 +947,80 @@ export default function Index() {
 
         </s-stack>
       </s-page>
+
+      {isOrdersModalOpen && (
+        <div
+          className="included-orders-overlay"
+          onClick={() => setIsOrdersModalOpen(false)}
+        >
+          <div
+            className="included-orders-popup"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="included-orders-popup-header">
+              <strong>Included orders</strong>
+              <button
+                type="button"
+                className="included-orders-close"
+                onClick={() => setIsOrdersModalOpen(false)}
+              >
+                Close
+              </button>
+            </div>
+
+            <p className="included-orders-popup-range">
+              Orders created from {fromDate} {fromTime} to {toDate} {toTime}{" "}
+              ({timezoneLabel})
+              {!isLoadingOrders && includedOrders.length > 0
+                ? ` · ${includedOrders.length} order${
+                    includedOrders.length === 1 ? "" : "s"
+                  }`
+                : ""}
+              .
+            </p>
+
+            {isLoadingOrders && (
+              <p>Loading orders in this date and time range...</p>
+            )}
+
+            {!isLoadingOrders && ordersFetcher.data?.error && (
+              <p className="included-orders-error">
+                {ordersFetcher.data.error}
+              </p>
+            )}
+
+            {!isLoadingOrders &&
+              !ordersFetcher.data?.error &&
+              includedOrders.length === 0 &&
+              ordersFetcher.data && (
+                <p>No orders were found in this date and time range.</p>
+              )}
+
+            {!isLoadingOrders && includedOrders.length > 0 && (
+              <div className="included-orders-table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Order</th>
+                      <th>Order date</th>
+                      <th>Items</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {includedOrders.map((order) => (
+                      <tr key={order.id}>
+                        <td>{order.name}</td>
+                        <td>{formatOrderDateTime(order.processedAt)}</td>
+                        <td>{order.itemCount}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
 
       <style>{`
@@ -1169,6 +1230,21 @@ export default function Index() {
           background: #f6f6f6;
         }
 
+        .quick-grid button.is-active {
+          background: #2c6ecb;
+          border-color: #2c6ecb;
+          color: white;
+        }
+
+        .quick-grid button.is-active:hover {
+          background: #1f5199;
+          border-color: #1f5199;
+        }
+
+        .quick-grid button:last-child {
+          grid-column: 1 / -1;
+        }
+
 
         /* =========================================
            NOTE
@@ -1203,8 +1279,108 @@ export default function Index() {
 
         .generate-area {
           display: flex;
-          justify-content: flex-end;
+          flex-direction: column;
+          align-items: stretch;
+          gap: 8px;
           margin-top: 10px;
+        }
+
+        .included-orders-link {
+          background: none;
+          border: none;
+          padding: 0;
+          color: #2c6ecb;
+          font-size: 13px;
+          text-align: center;
+          cursor: pointer;
+          text-decoration: underline;
+        }
+
+        .included-orders-link:hover {
+          color: #1f5199;
+        }
+
+        .included-orders-link:disabled {
+          color: #8c9196;
+          cursor: default;
+          text-decoration: none;
+        }
+
+        .included-orders-table-wrap {
+          flex: 1 1 auto;
+          min-height: 0;
+          overflow: auto;
+          overscroll-behavior: contain;
+          border: 1px solid #e5e5e5;
+          border-radius: 6px;
+        }
+
+        .included-orders-table-wrap thead th {
+          position: sticky;
+          top: 0;
+          z-index: 1;
+          box-shadow: 0 1px 0 #eeeeee;
+        }
+
+        .included-orders-overlay {
+          position: fixed;
+          inset: 0;
+          background: rgba(26, 26, 26, 0.45);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 24px;
+          z-index: 1000;
+          overflow: hidden;
+        }
+
+        .included-orders-popup {
+          width: min(640px, 100%);
+          max-height: 100%;
+          display: flex;
+          flex-direction: column;
+          flex: 0 1 auto;
+          min-height: 0;
+          overflow: hidden;
+          background: white;
+          border: 1px solid #d9d9d9;
+          border-radius: 8px;
+          padding: 18px;
+        }
+
+        .included-orders-popup-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          margin-bottom: 8px;
+          flex-shrink: 0;
+        }
+
+        .included-orders-popup-header strong {
+          font-size: 16px;
+        }
+
+        .included-orders-popup-range,
+        .included-orders-popup p {
+          font-size: 13px;
+          line-height: 1.5;
+          margin: 0 0 12px;
+          flex-shrink: 0;
+        }
+
+        .included-orders-close {
+          height: 32px;
+          padding: 0 12px;
+          border: 1px solid #c9c9c9;
+          border-radius: 6px;
+          background: white;
+          cursor: pointer;
+          font-size: 13px;
+        }
+
+        .included-orders-error {
+          color: #9b1c1c;
         }
 
         .generate-button {
@@ -1297,6 +1473,11 @@ export default function Index() {
           text-align: right;
         }
 
+        .preview-empty {
+          text-align: center !important;
+          color: #6d7175;
+        }
+
         .preview-total {
           display: flex;
           justify-content: space-between;
@@ -1368,8 +1549,13 @@ export default function Index() {
           text-align: left;
         }
 
-        .print-button:hover {
+        .print-button:hover:not(:disabled) {
           background: #f6f6f6;
+        }
+
+        .print-button:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
         }
 
         .print-icon {
