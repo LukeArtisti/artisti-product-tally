@@ -598,47 +598,49 @@ export default function Index() {
 
                       </div>
 
-                      <table>
+                      <div className="preview-table-wrap">
+                        <table>
 
-                        <thead>
-                          <tr>
-                            <th>SKU</th>
-                            <th>Product Name</th>
-                            <th>Variant</th>
-                            <th>Quantity</th>
-                          </tr>
-                        </thead>
+                          <thead>
+                            <tr>
+                              <th>SKU</th>
+                              <th>Product Name</th>
+                              <th>Variant</th>
+                              <th>Quantity</th>
+                            </tr>
+                          </thead>
 
-                        <tbody>
-                          {isGenerating ? (
-                            <tr>
-                              <td colSpan={4} className="preview-empty">
-                                Loading coffee products from orders...
-                              </td>
-                            </tr>
-                          ) : coffeeProducts.length === 0 ? (
-                            <tr>
-                              <td colSpan={4} className="preview-empty">
-                                {fetcher.data?.success
-                                  ? "No coffee products in this order range."
-                                  : "Generate a product tally to preview coffee items."}
-                              </td>
-                            </tr>
-                          ) : (
-                            coffeeProducts.map((item) => (
-                              <tr
-                                key={`${item.sku}-${item.name}-${item.variant}`}
-                              >
-                                <td>{item.sku || "—"}</td>
-                                <td>{item.name}</td>
-                                <td>{item.variant}</td>
-                                <td>{item.quantity}</td>
+                          <tbody>
+                            {isGenerating ? (
+                              <tr>
+                                <td colSpan={4} className="preview-empty">
+                                  Loading coffee products from orders...
+                                </td>
                               </tr>
-                            ))
-                          )}
-                        </tbody>
+                            ) : coffeeProducts.length === 0 ? (
+                              <tr>
+                                <td colSpan={4} className="preview-empty">
+                                  {fetcher.data?.success
+                                    ? "No coffee products in this order range."
+                                    : "Generate a product tally to preview coffee items."}
+                                </td>
+                              </tr>
+                            ) : (
+                              coffeeProducts.map((item) => (
+                                <tr
+                                  key={`${item.sku}-${item.name}-${item.variant}`}
+                                >
+                                  <td>{item.sku || "—"}</td>
+                                  <td>{item.name}</td>
+                                  <td>{item.variant}</td>
+                                  <td>{item.quantity}</td>
+                                </tr>
+                              ))
+                            )}
+                          </tbody>
 
-                      </table>
+                        </table>
+                      </div>
 
                       <div className="preview-total">
 
@@ -670,50 +672,52 @@ export default function Index() {
 
                       </div>
 
-                      <table>
+                      <div className="preview-table-wrap">
+                        <table>
 
-                        <thead>
-                          <tr>
-                            <th>SKU</th>
-                            <th>Item Name</th>
-                            <th>Quantity</th>
-                          </tr>
-                        </thead>
-
-                        <tbody>
-
-                          {isGenerating ? (
+                          <thead>
                             <tr>
-                              <td colSpan={3} className="preview-empty">
-                                Loading accessories from orders...
-                              </td>
+                              <th>SKU</th>
+                              <th>Item Name</th>
+                              <th>Quantity</th>
                             </tr>
-                          ) : accessories.length === 0 ? (
-                            <tr>
-                              <td colSpan={3} className="preview-empty">
-                                {fetcher.data?.success
-                                  ? "No accessories in this order range."
-                                  : "Generate a product tally to preview accessories."}
-                              </td>
-                            </tr>
-                          ) : (
-                            accessories.map((item) => (
-                              <tr
-                                key={`${item.sku}-${item.name}-${item.variant}`}
-                              >
-                                <td>{item.sku || "—"}</td>
-                                <td>
-                                  {item.name}
-                                  {item.variant ? ` – ${item.variant}` : ""}
+                          </thead>
+
+                          <tbody>
+
+                            {isGenerating ? (
+                              <tr>
+                                <td colSpan={3} className="preview-empty">
+                                  Loading accessories from orders...
                                 </td>
-                                <td>{item.quantity}</td>
                               </tr>
-                            ))
-                          )}
+                            ) : accessories.length === 0 ? (
+                              <tr>
+                                <td colSpan={3} className="preview-empty">
+                                  {fetcher.data?.success
+                                    ? "No accessories in this order range."
+                                    : "Generate a product tally to preview accessories."}
+                                </td>
+                              </tr>
+                            ) : (
+                              accessories.map((item) => (
+                                <tr
+                                  key={`${item.sku}-${item.name}-${item.variant}`}
+                                >
+                                  <td>{item.sku || "—"}</td>
+                                  <td>
+                                    {item.name}
+                                    {item.variant ? ` – ${item.variant}` : ""}
+                                  </td>
+                                  <td>{item.quantity}</td>
+                                </tr>
+                              ))
+                            )}
 
-                        </tbody>
+                          </tbody>
 
-                      </table>
+                        </table>
+                      </div>
 
                       <div className="preview-total">
 
@@ -1449,6 +1453,11 @@ export default function Index() {
            TABLE
         ========================================= */
 
+        .preview-table-wrap {
+          max-height: 500px;
+          overflow: auto;
+        }
+
         table {
           width: 100%;
           border-collapse: collapse;
@@ -1466,6 +1475,9 @@ export default function Index() {
         th {
           font-weight: 600;
           background: #fafafa;
+          position: sticky;
+          top: 0;
+          z-index: 1;
         }
 
         td:last-child,
