@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
 import type {
   ActionFunctionArgs,
   HeadersFunction,
@@ -9,18 +10,33 @@ import { useFetcher, useLoaderData } from "react-router";
 import { authenticate } from "../shopify.server";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import {
-  buildOrderRangeQuery,
+  filterOrdersBySelection,
+  ORDER_STATUS_OPTIONS,
+  parseOrderStatuses,
+  parseSalesChannelIds,
+  type OrderStatusValue,
+} from "../order-filters";
+import {
+  buildTallyOrderQuery,
   fetchAllOrders,
+  fetchSalesChannels,
   fetchShopTimezone,
-  type IncludedOrder,
-  type ShopTimezone,
+  gidNumericId,
 } from "../orders.server";
+import { SHOP_ABN } from "../shipping-label";
+import type {
+  IncludedOrder,
+  ShippingLabelOrder,
+  ShopPrintInfo,
+  ShopTimezone,
+} from "../shipping-label";
 import { tallyOrders, type TallyItem } from "../tally.server";
 
 type TallyResponse = {
   success?: boolean;
   error?: string;
   orderCount?: number;
+  orderIds?: string[];
   coffeeProducts?: TallyItem[];
   accessories?: TallyItem[];
   totalCoffeeItems?: number;
@@ -32,6 +48,13 @@ type OrdersListResponse = {
   success?: boolean;
   error?: string;
   orders?: IncludedOrder[];
+};
+
+type ShippingLabelsResponse = {
+  success?: boolean;
+  error?: string;
+  shop?: ShopPrintInfo | null;
+  orders?: ShippingLabelOrder[];
 };
 
 function formatYmdInTimeZone(date: Date, timeZone: string) {
@@ -63,10 +86,444 @@ function formatTimezoneLabel(shop: Pick<ShopTimezone, "timezoneAbbreviation" | "
   return `${shop.timezoneAbbreviation} ${shop.timezoneOffset}`;
 }
 
+type FilterOption = {
+  value: string;
+  label: string;
+};
+
+function MultiSelectFilter({
+  label,
+  options,
+  selected,
+  onChange,
+  allLabel,
+}: {
+  label: string;
+  options: FilterOption[];
+  selected: string[];
+  onChange: (next: string[]) => void;
+  allLabel: string;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [menuStyle, setMenuStyle] = useState<CSSProperties>({});
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const selectedSet = new Set(selected);
+  const allSelected =
+    options.length > 0 && options.every((option) => selectedSet.has(option.value));
+  const summary = allSelected || selected.length === 0
+    ? allLabel
+    : options
+        .filter((option) => selectedSet.has(option.value))
+        .map((option) => option.label)
+        .join(", ");
+
+  useLayoutEffect(() => {
+    if (!isOpen) return;
+
+    const updateMenuPosition = () => {
+      const trigger = triggerRef.current;
+      if (!trigger) return;
+
+      const rect = trigger.getBoundingClientRect();
+      const padding = 8;
+      const maxHeight = 220;
+      const spaceBelow = window.innerHeight - rect.bottom - padding;
+      const spaceAbove = rect.top - padding;
+      const openUp = spaceBelow < 140 && spaceAbove > spaceBelow;
+      const available = openUp ? spaceAbove : spaceBelow;
+
+      setMenuStyle({
+        position: "fixed",
+        left: rect.left,
+        width: Math.max(rect.width, 180),
+        top: openUp ? undefined : rect.bottom + 4,
+        bottom: openUp ? window.innerHeight - rect.top + 4 : undefined,
+        maxHeight: Math.min(maxHeight, Math.max(available - 4, 80)),
+        zIndex: 10000,
+      });
+    };
+
+    updateMenuPosition();
+    window.addEventListener("resize", updateMenuPosition);
+    window.addEventListener("scroll", updateMenuPosition, true);
+
+    return () => {
+      window.removeEventListener("resize", updateMenuPosition);
+      window.removeEventListener("scroll", updateMenuPosition, true);
+    };
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (
+        rootRef.current?.contains(target) ||
+        menuRef.current?.contains(target)
+      ) {
+        return;
+      }
+
+      setIsOpen(false);
+    };
+
+    document.addEventListener("mousedown", handlePointerDown);
+
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, [isOpen]);
+
+  const toggleValue = (value: string) => {
+    if (selectedSet.has(value)) {
+      onChange(selected.filter((item) => item !== value));
+      return;
+    }
+
+    onChange([...selected, value]);
+  };
+
+  const menu =
+    isOpen && typeof document !== "undefined"
+      ? createPortal(
+          <div className="filter-select-menu" ref={menuRef} style={menuStyle}>
+            {options.length === 0 ? (
+              <div className="filter-select-empty">No options available</div>
+            ) : (
+              options.map((option) => (
+                <label key={option.value} className="filter-select-option">
+                  <input
+                    type="checkbox"
+                    checked={selectedSet.has(option.value)}
+                    onChange={() => toggleValue(option.value)}
+                  />
+                  <span>{option.label}</span>
+                </label>
+              ))
+            )}
+          </div>,
+          document.body,
+        )
+      : null;
+
+  return (
+    <div className={`filter-select${isOpen ? " is-open" : ""}`} ref={rootRef}>
+      <s-text>
+        <strong>{label}</strong>
+      </s-text>
+
+      <button
+        type="button"
+        className="filter-select-trigger"
+        ref={triggerRef}
+        onClick={() => setIsOpen((open) => !open)}
+        aria-expanded={isOpen}
+      >
+        <span>{summary}</span>
+        <span className="filter-select-caret">▾</span>
+      </button>
+
+      {menu}
+    </div>
+  );
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function formatPrintNow(timeZone: string) {
+  return new Date().toLocaleDateString("en-US", {
+    timeZone,
+    month: "2-digit",
+    day: "2-digit",
+    year: "2-digit",
+  });
+}
+
+function thankYouMarkup(text: string) {
+  return text
+    .split("\n")
+    .map((line) => escapeHtml(line))
+    .join("<br>");
+}
+
+function shippingSlipInnerHtml(
+  shop: ShopPrintInfo,
+  order: ShippingLabelOrder,
+  printedAt: string,
+) {
+  const itemRows = order.items
+    .map(
+      (item) => `
+        <tr>
+          <td class="image-cell">
+            ${
+              item.imageUrl
+                ? `<div class="item-image"><img src="${escapeHtml(item.imageUrl)}" alt="" /></div>`
+                : ""
+            }
+          </td>
+          <td class="sku-cell">${escapeHtml(item.sku)}x</td>
+          <td class="qty-cell">${escapeHtml(String(item.quantity))} x</td>
+          <td class="item-cell"><b>${escapeHtml(item.name)}</b></td>
+        </tr>`,
+    )
+    .join("");
+
+  const giftRow = order.giftWrapped
+    ? `<tr>
+        <td class="image-cell"></td>
+        <td class="sku-cell">Yes</td>
+        <td class="qty-cell"></td>
+        <td class="item-cell"><b>Gift Wrapped</b></td>
+      </tr>`
+    : "";
+
+  const thankYouBlock = order.thankYouHtml
+    ? `<p class="thanks-under"><b>${thankYouMarkup(order.thankYouHtml)}</b></p>`
+    : "";
+
+  const noteBlock = order.note
+    ? `<p class="thanks-under">${escapeHtml(order.note)}</p>`
+    : "";
+
+  const shippingDetails = order.hasShippingAddress
+    ? `
+      <h3>Shipping Details</h3>
+      <div class="box">
+        <strong>${escapeHtml(order.shippingName)}</strong><br>
+        ${order.shippingPhone ? `${escapeHtml(order.shippingPhone)}<br>` : ""}
+        ${order.shippingCompany ? `${escapeHtml(order.shippingCompany)}<br>` : ""}
+        ${order.shippingStreet.map((line) => `${escapeHtml(line)}<br>`).join("")}
+        ${order.shippingCityLine ? `${escapeHtml(order.shippingCityLine)}<br>` : ""}
+        ${order.shippingCountry ? `${escapeHtml(order.shippingCountry)}<br>` : ""}
+        <br>
+        <strong>Shipping Method:</strong> ${escapeHtml(order.shippingMethod)}
+      </div>`
+    : `
+      <h3>Shipping Details</h3>
+      <div class="box">
+        <strong>Shipping Method:</strong> ${escapeHtml(order.shippingMethod)}
+      </div>`;
+
+  return `
+    <p class="slip-date">
+      ${escapeHtml(printedAt)}<br>
+      Order / Invoice No. ${escapeHtml(order.name)}
+    </p>
+    <div class="slip-shop">
+      <strong class="shop-name">${escapeHtml(shop.name)}</strong><br><br>
+      ${shop.address1 ? `${escapeHtml(shop.address1)}<br>` : ""}
+      ${shop.cityLine ? `${escapeHtml(shop.cityLine)}<br>` : ""}
+      ${shop.country ? `${escapeHtml(shop.country)}<br>` : ""}
+      ABN: ${SHOP_ABN}
+    </div>
+    <hr>
+    <h3>Item Details</h3>
+    <table class="item-table">
+      <colgroup>
+        <col class="col-image" />
+        <col class="col-sku" />
+        <col class="col-qty" />
+        <col class="col-item" />
+      </colgroup>
+      <thead>
+        <tr>
+          <th class="image-cell"></th>
+          <th class="sku-cell">item sku</th>
+          <th class="qty-cell">Quantity</th>
+          <th class="item-cell">Item</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${itemRows}
+        ${giftRow}
+      </tbody>
+    </table>
+    ${thankYouBlock}
+    ${noteBlock}
+    <h3>Customer Details</h3>
+    <div class="box">
+      ${order.customerName ? `${escapeHtml(order.customerName)}<br>` : ""}
+      ${order.customerPhone ? `${escapeHtml(order.customerPhone)}<br>` : ""}
+      ${order.customerEmail ? `${escapeHtml(order.customerEmail)}<br>` : ""}
+      ${order.customerDefaultAddress ? escapeHtml(order.customerDefaultAddress) : ""}
+    </div>
+    ${shippingDetails}
+    <p class="footer">
+      If you have any questions, please send an email to <u>${escapeHtml(shop.email)}</u>
+    </p>
+  `;
+}
+
+function printHtmlDocument(html: string) {
+  const iframe = document.createElement("iframe");
+  const url = URL.createObjectURL(new Blob([html], { type: "text/html" }));
+
+  iframe.setAttribute("aria-hidden", "true");
+  iframe.style.position = "fixed";
+  iframe.style.right = "0";
+  iframe.style.bottom = "0";
+  iframe.style.width = "0";
+  iframe.style.height = "0";
+  iframe.style.border = "0";
+  document.body.appendChild(iframe);
+
+  const cleanup = () => {
+    URL.revokeObjectURL(url);
+    iframe.remove();
+  };
+
+  iframe.onload = () => {
+    iframe.contentWindow?.focus();
+    iframe.contentWindow?.print();
+    window.setTimeout(cleanup, 1000);
+  };
+
+  iframe.src = url;
+}
+
+function buildShippingLabelPrintHtml(
+  shop: ShopPrintInfo,
+  orders: ShippingLabelOrder[],
+  timeZone: string,
+) {
+  const printedAt = formatPrintNow(timeZone);
+  const slips = orders
+    .map(
+      (order) =>
+        `<article class="slip">${shippingSlipInnerHtml(shop, order, printedAt)}</article>`,
+    )
+    .join("");
+
+  return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Shipping labels</title>
+    <style>
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        color: #111;
+        font-family: Helvetica, Arial, sans-serif;
+        font-size: 14px;
+        line-height: 1.4;
+      }
+      .slip {
+        max-width: 760px;
+        margin: 0 auto 24px;
+        padding: 24px 28px 16px;
+        page-break-after: always;
+      }
+      .slip:last-child { page-break-after: auto; }
+      .slip-date {
+        float: right;
+        text-align: right;
+        margin: 0;
+      }
+      .slip-shop { margin: 0 0 1.5em 0; }
+      .shop-name { font-size: 2em; }
+      hr {
+        clear: both;
+        border: none;
+        border-top: 2px solid #111;
+        margin: 0 0 1.2em;
+      }
+      h3 { margin: 0 0 1em; font-size: 16px; }
+      .item-table {
+        width: 100%;
+        border-collapse: collapse;
+        table-layout: fixed;
+        margin: 0 0 1.5em;
+      }
+      .col-image { width: 120px; }
+      .col-sku { width: 28%; }
+      .col-qty { width: 18%; }
+      .col-item { width: auto; }
+      .item-table th,
+      .item-table td {
+        border: none;
+        border-top: 1px solid #111;
+        border-bottom: 1px solid #111;
+        padding: 16px 12px;
+        vertical-align: middle;
+        text-align: left;
+      }
+      .item-table th:first-child,
+      .item-table td:first-child {
+        border-left: 1px solid #111;
+      }
+      .item-table th:last-child,
+      .item-table td:last-child {
+        border-right: 1px solid #111;
+      }
+      .item-table th {
+        font-weight: 700;
+      }
+      .item-table td.image-cell {
+        padding: 12px;
+      }
+      .item-image {
+        width: 100px;
+        height: 100px;
+      }
+      .item-image img {
+        width: 100px;
+        height: 100px;
+        object-fit: contain;
+        display: block;
+      }
+      .thanks-under {
+        margin: 0 0 1.5em;
+        text-align: left;
+      }
+      .box {
+        margin: 0 0 1em;
+        padding: 1em;
+        border: 1px solid #111;
+        min-height: 72px;
+      }
+      .footer { margin: 1em 0 0; }
+      @media print {
+        .slip { margin: 0; padding: 12px 0; }
+      }
+    </style>
+  </head>
+  <body>${slips}</body>
+</html>`;
+}
+
+function parseExcludedOrderIds(value: FormDataEntryValue | null) {
+  try {
+    const parsed = JSON.parse(String(value || "[]"));
+
+    if (!Array.isArray(parsed)) {
+      return new Set<string>();
+    }
+
+    return new Set(
+      parsed.filter((id): id is string => typeof id === "string" && id.length > 0),
+    );
+  } catch {
+    return new Set<string>();
+  }
+}
+
 export async function loader({ request }: LoaderFunctionArgs) {
   const { admin } = await authenticate.admin(request);
+  const [shop, salesChannels] = await Promise.all([
+    fetchShopTimezone(admin),
+    fetchSalesChannels(admin),
+  ]);
 
-  return fetchShopTimezone(admin);
+  return { ...shop, salesChannels };
 }
 
 export async function action({ request }: ActionFunctionArgs) {
@@ -88,16 +545,38 @@ export async function action({ request }: ActionFunctionArgs) {
 
   try {
     const shop = await fetchShopTimezone(admin);
-    const orderQuery = buildOrderRangeQuery(
+    const salesChannels = await fetchSalesChannels(admin);
+    const statuses = parseOrderStatuses(formData.get("orderStatuses"));
+    const selectedChannelIds = parseSalesChannelIds(
+      formData.get("salesChannelIds"),
+    );
+    const orderQuery = buildTallyOrderQuery(
       fromDate,
       fromTime,
       toDate,
       toTime,
       shop.ianaTimezone,
+      statuses,
+      salesChannels,
+      selectedChannelIds,
     );
 
-    const orders = await fetchAllOrders(admin, orderQuery);
-    const { coffeeProducts, accessories } = tallyOrders(orders);
+    const excludedOrderIds = parseExcludedOrderIds(
+      formData.get("excludedOrderIds"),
+    );
+    const orders = filterOrdersBySelection(
+      await fetchAllOrders(admin, orderQuery),
+      statuses,
+      salesChannels,
+      selectedChannelIds,
+    );
+    const ordersToTally = orders.filter(
+      (order) => !excludedOrderIds.has(order.id),
+    );
+    const orderIds = ordersToTally
+      .map((order) => gidNumericId(order.id))
+      .filter(Boolean);
+    const { coffeeProducts, accessories } = tallyOrders(ordersToTally);
 
     const totalCoffeeItems = coffeeProducts.reduce(
       (sum, item) => sum + item.quantity,
@@ -111,7 +590,8 @@ export async function action({ request }: ActionFunctionArgs) {
 
     return Response.json({
       success: true,
-      orderCount: orders.length,
+      orderCount: ordersToTally.length,
+      orderIds,
       coffeeProducts,
       accessories,
       totalCoffeeItems,
@@ -139,6 +619,8 @@ export default function Index() {
   const shop = useLoaderData<typeof loader>();
   const fetcher = useFetcher<TallyResponse>();
   const ordersFetcher = useFetcher<OrdersListResponse>();
+  const labelsFetcher = useFetcher<ShippingLabelsResponse>();
+  const salesChannels = shop.salesChannels ?? [];
 
   const ianaTimezone = shop.ianaTimezone || "UTC";
   const timezoneLabel = formatTimezoneLabel(shop);
@@ -149,6 +631,14 @@ export default function Index() {
   const [toDate, setToDate] = useState(storeToday);
   const [toTime, setToTime] = useState("23:59");
   const [isOrdersModalOpen, setIsOrdersModalOpen] = useState(false);
+  const [isPrintModalOpen, setIsPrintModalOpen] = useState(false);
+  const [excludedOrderIds, setExcludedOrderIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [orderStatuses, setOrderStatuses] = useState<OrderStatusValue[]>([
+    "open",
+  ]);
+  const [salesChannelIds, setSalesChannelIds] = useState<string[]>(["all"]);
 
   const coffeeProducts = fetcher.data?.coffeeProducts ?? [];
   const accessories = fetcher.data?.accessories ?? [];
@@ -234,6 +724,10 @@ export default function Index() {
     setToTime(range.toTime);
   };
 
+  useEffect(() => {
+    setExcludedOrderIds(new Set());
+  }, [fromDate, fromTime, toDate, toTime, orderStatuses, salesChannelIds]);
+
   const activeQuickSelect = (
     ["today", "yesterday", "last7", "last30", "thisMonth"] as const
   ).find((type) => {
@@ -255,6 +749,9 @@ export default function Index() {
         fromTime,
         toDate,
         toTime,
+        orderStatuses: JSON.stringify(orderStatuses),
+        salesChannelIds: JSON.stringify(salesChannelIds),
+        excludedOrderIds: JSON.stringify([...excludedOrderIds]),
       },
       {
         method: "POST",
@@ -270,6 +767,8 @@ export default function Index() {
       fromTime,
       toDate,
       toTime,
+      orderStatuses: JSON.stringify(orderStatuses),
+      salesChannelIds: JSON.stringify(salesChannelIds),
     });
 
     ordersFetcher.load(`/app/included-orders?${params.toString()}`);
@@ -289,7 +788,48 @@ export default function Index() {
 
   const isGenerating = fetcher.state !== "idle";
   const isLoadingOrders = ordersFetcher.state !== "idle";
+  const isLoadingLabels = labelsFetcher.state !== "idle";
   const includedOrders = ordersFetcher.data?.orders ?? [];
+  const shippingLabelShop = labelsFetcher.data?.shop ?? null;
+  const shippingLabelOrders = labelsFetcher.data?.orders ?? [];
+  const selectedOrderCount = includedOrders.filter(
+    (order) => !excludedOrderIds.has(order.id),
+  ).length;
+  const allVisibleSelected =
+    includedOrders.length > 0 && selectedOrderCount === includedOrders.length;
+  const someVisibleSelected = selectedOrderCount > 0 && !allVisibleSelected;
+
+  const toggleOrderIncluded = (orderId: string) => {
+    setExcludedOrderIds((current) => {
+      const next = new Set(current);
+
+      if (next.has(orderId)) {
+        next.delete(orderId);
+      } else {
+        next.add(orderId);
+      }
+
+      return next;
+    });
+  };
+
+  const toggleAllVisibleOrders = () => {
+    setExcludedOrderIds((current) => {
+      const next = new Set(current);
+
+      if (allVisibleSelected) {
+        for (const order of includedOrders) {
+          next.add(order.id);
+        }
+      } else {
+        for (const order of includedOrders) {
+          next.delete(order.id);
+        }
+      }
+
+      return next;
+    });
+  };
 
   const csvCell = (value: string | number) => {
     const text = String(value ?? "");
@@ -353,6 +893,33 @@ export default function Index() {
         ]),
         ["", "Total Accessory Items", totalAccessoryItems],
       ],
+    );
+  };
+
+  const printShippingLabels = () => {
+    setIsPrintModalOpen(true);
+
+    const params = new URLSearchParams({
+      fromDate,
+      fromTime,
+      toDate,
+      toTime,
+      orderStatuses: JSON.stringify(orderStatuses),
+      salesChannelIds: JSON.stringify(salesChannelIds),
+      excludedOrderIds: JSON.stringify([...excludedOrderIds]),
+    });
+
+    labelsFetcher.load(`/app/shipping-labels?${params.toString()}`);
+  };
+
+  const confirmPrintShippingLabels = () => {
+    const shopInfo = labelsFetcher.data?.shop;
+    const labelOrders = labelsFetcher.data?.orders ?? [];
+
+    if (!shopInfo || labelOrders.length === 0) return;
+
+    printHtmlDocument(
+      buildShippingLabelPrintHtml(shopInfo, labelOrders, ianaTimezone),
     );
   };
 
@@ -509,23 +1076,69 @@ export default function Index() {
                     <div className="note-column">
 
                       <div className="info-note">
-
-                        <strong>Note</strong>
-
-                        <div>
-                          The tally will include orders created from{" "}
-                          <b>
-                            {fromDate} {fromTime}
-                          </b>{" "}
-                          to{" "}
-                          <b>
-                            {toDate} {toTime}
-                          </b>.
-                        </div>
-
+                        <strong>Note:</strong>{" "}
+                        The tally will include orders created from{" "}
+                        <b>
+                          {fromDate} {fromTime}
+                        </b>{" "}
+                        to{" "}
+                        <b>
+                          {toDate} {toTime}
+                        </b>.
                       </div>
 
                       <div className="generate-area">
+
+                        <div className="tally-filters">
+                          <MultiSelectFilter
+                            label="Order status"
+                            allLabel="All"
+                            options={ORDER_STATUS_OPTIONS.map((option) => ({
+                              value: option.value,
+                              label: option.label,
+                            }))}
+                            selected={orderStatuses}
+                            onChange={(next) => {
+                              const values = next.filter((value): value is OrderStatusValue =>
+                                ORDER_STATUS_OPTIONS.some((option) => option.value === value),
+                              );
+
+                              if (values.includes("all") && !orderStatuses.includes("all")) {
+                                setOrderStatuses(["all"]);
+                                return;
+                              }
+
+                              const withoutAll = values.filter((value) => value !== "all");
+                              setOrderStatuses(
+                                withoutAll.length > 0 ? withoutAll : ["open"],
+                              );
+                            }}
+                          />
+
+                          <MultiSelectFilter
+                            label="Sales channel"
+                            allLabel="All"
+                            options={[
+                              { value: "all", label: "All" },
+                              ...salesChannels.map((channel) => ({
+                                value: channel.id,
+                                label: channel.name,
+                              })),
+                            ]}
+                            selected={salesChannelIds}
+                            onChange={(next) => {
+                              if (next.includes("all") && !salesChannelIds.includes("all")) {
+                                setSalesChannelIds(["all"]);
+                                return;
+                              }
+
+                              const withoutAll = next.filter((value) => value !== "all");
+                              setSalesChannelIds(
+                                withoutAll.length > 0 ? withoutAll : ["all"],
+                              );
+                            }}
+                          />
+                        </div>
 
                         <button
                           type="button"
@@ -750,7 +1363,8 @@ export default function Index() {
                     </div>
 
                     <div className="generate-print-description">
-                      Download CSV packing sheets that match the preview above.
+                      Download CSV packing sheets, or print shipping labels for
+                      the orders in this tally.
                     </div>
 
                   </div>
@@ -829,6 +1443,50 @@ export default function Index() {
 
                         <span>
                           Accessories only
+                        </span>
+
+                      </span>
+
+                    </button>
+
+
+                    <button
+                      type="button"
+                      className="print-button"
+                      onClick={printShippingLabels}
+                      disabled={
+                        isGenerating ||
+                        isLoadingLabels ||
+                        (fetcher.data?.orderIds ?? []).length === 0
+                      }
+                    >
+
+                      <span className="print-icon">
+                        <svg
+                          viewBox="0 0 24 24"
+                          width="21"
+                          height="21"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.8"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="M7 7h10v13H7z" />
+                          <path d="M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2" />
+                          <path d="M9 12h6" />
+                          <path d="M9 16h4" />
+                        </svg>
+                      </span>
+
+                      <span className="print-button-content">
+
+                        <strong>
+                          Print Shipping Label
+                        </strong>
+
+                        <span>
+                          Packing slips for included orders
                         </span>
 
                       </span>
@@ -976,11 +1634,9 @@ export default function Index() {
               Orders created from {fromDate} {fromTime} to {toDate} {toTime}{" "}
               ({timezoneLabel})
               {!isLoadingOrders && includedOrders.length > 0
-                ? ` · ${includedOrders.length} order${
-                    includedOrders.length === 1 ? "" : "s"
-                  }`
+                ? ` · ${selectedOrderCount} of ${includedOrders.length} selected`
                 : ""}
-              .
+              . Uncheck an order to exclude it from the product tally.
             </p>
 
             {isLoadingOrders && (
@@ -1005,23 +1661,134 @@ export default function Index() {
                 <table>
                   <thead>
                     <tr>
+                      <th className="included-orders-check">
+                        <input
+                          type="checkbox"
+                          checked={allVisibleSelected}
+                          ref={(element) => {
+                            if (element) {
+                              element.indeterminate = someVisibleSelected;
+                            }
+                          }}
+                          onChange={toggleAllVisibleOrders}
+                          aria-label="Select all orders"
+                        />
+                      </th>
                       <th>Order</th>
                       <th>Order date</th>
                       <th>Items</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {includedOrders.map((order) => (
-                      <tr key={order.id}>
-                        <td>{order.name}</td>
-                        <td>{formatOrderDateTime(order.processedAt)}</td>
-                        <td>{order.itemCount}</td>
-                      </tr>
-                    ))}
+                    {includedOrders.map((order) => {
+                      const isIncluded = !excludedOrderIds.has(order.id);
+
+                      return (
+                        <tr
+                          key={order.id}
+                          className={isIncluded ? undefined : "is-excluded"}
+                        >
+                          <td className="included-orders-check">
+                            <input
+                              type="checkbox"
+                              checked={isIncluded}
+                              onChange={() => toggleOrderIncluded(order.id)}
+                              aria-label={`Include ${order.name}`}
+                            />
+                          </td>
+                          <td>{order.name}</td>
+                          <td>{formatOrderDateTime(order.processedAt)}</td>
+                          <td>{order.itemCount}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {isPrintModalOpen && (
+        <div
+          className="included-orders-overlay print-labels-overlay"
+          onClick={() => setIsPrintModalOpen(false)}
+        >
+          <div
+            className="print-labels-popup"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="print-labels-body">
+              <div className="print-labels-preview">
+                {isLoadingLabels && (
+                  <p className="print-labels-status">
+                    Loading shipping labels...
+                  </p>
+                )}
+
+                {!isLoadingLabels && labelsFetcher.data?.error && (
+                  <p className="included-orders-error">
+                    {labelsFetcher.data.error}
+                  </p>
+                )}
+
+                {!isLoadingLabels &&
+                  !labelsFetcher.data?.error &&
+                  shippingLabelOrders.length === 0 &&
+                  labelsFetcher.data && (
+                    <p className="print-labels-status">
+                      No included orders were found to print.
+                    </p>
+                  )}
+
+                {!isLoadingLabels &&
+                  shippingLabelShop &&
+                  shippingLabelOrders.map((order) => (
+                    <article
+                      key={order.id}
+                      className="shipping-slip"
+                      dangerouslySetInnerHTML={{
+                        __html: shippingSlipInnerHtml(
+                          shippingLabelShop,
+                          order,
+                          formatPrintNow(ianaTimezone),
+                        ),
+                      }}
+                    />
+                  ))}
+              </div>
+
+              <aside className="print-labels-sidebar">
+                <div className="print-labels-sidebar-title">Documents</div>
+                <label className="print-labels-option">
+                  <input type="checkbox" checked readOnly />
+                  <span>Shipping label</span>
+                </label>
+              </aside>
+            </div>
+
+            <div className="print-labels-footer">
+              <button
+                type="button"
+                className="print-labels-cancel"
+                onClick={() => setIsPrintModalOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="print-labels-continue"
+                onClick={confirmPrintShippingLabels}
+                disabled={
+                  isLoadingLabels ||
+                  !shippingLabelShop ||
+                  shippingLabelOrders.length === 0
+                }
+              >
+                Continue to print
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1263,17 +2030,16 @@ export default function Index() {
         .info-note {
           border: 1px solid #b6d7f2;
           background: #f0f7ff;
-          border-radius: 8px;
-          padding: 14px;
-          font-size: 13px;
-          line-height: 1.5;
+          border-radius: 6px;
+          padding: 8px 10px;
+          font-size: 12px;
+          line-height: 1.4;
           color: #174a70;
-          min-height: 110px;
         }
 
         .info-note strong {
-          display: block;
-          margin-bottom: 5px;
+          display: inline;
+          margin-right: 4px;
         }
 
 
@@ -1287,6 +2053,84 @@ export default function Index() {
           align-items: stretch;
           gap: 8px;
           margin-top: 10px;
+        }
+
+        .tally-filters {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 8px;
+          position: relative;
+          z-index: 5;
+        }
+
+        .filter-select {
+          position: relative;
+          min-width: 0;
+        }
+
+        .filter-select.is-open {
+          z-index: 6;
+        }
+
+        .filter-select-trigger {
+          width: 100%;
+          height: 36px;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px;
+          padding: 0 10px;
+          border: 1px solid #b5b5b5;
+          border-radius: 6px;
+          background: white;
+          font-size: 13px;
+          cursor: pointer;
+          text-align: left;
+        }
+
+        .filter-select-trigger span:first-child {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .filter-select-caret {
+          color: #6d7175;
+          flex-shrink: 0;
+        }
+
+        .filter-select-menu {
+          overflow: auto;
+          border: 1px solid #d9d9d9;
+          border-radius: 6px;
+          background: white;
+          box-shadow: 0 8px 18px rgba(0, 0, 0, 0.08);
+          padding: 6px 0;
+        }
+
+        .filter-select-option {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          padding: 6px 10px;
+          font-size: 13px;
+          cursor: pointer;
+        }
+
+        .filter-select-option:hover {
+          background: #f6f6f6;
+        }
+
+        .filter-select-option input {
+          width: 14px;
+          height: 14px;
+          margin: 0;
+        }
+
+        .filter-select-empty {
+          padding: 10px;
+          font-size: 12px;
+          color: #6d7175;
         }
 
         .included-orders-link {
@@ -1385,6 +2229,234 @@ export default function Index() {
 
         .included-orders-error {
           color: #9b1c1c;
+        }
+
+        .included-orders-check {
+          width: 36px;
+          text-align: center !important;
+          vertical-align: middle;
+        }
+
+        .included-orders-check input {
+          width: 16px;
+          height: 16px;
+          margin: 0;
+          cursor: pointer;
+        }
+
+        .included-orders-table-wrap tr.is-excluded td {
+          color: #8c9196;
+        }
+
+        .print-labels-popup {
+          width: min(1080px, 100%);
+          height: min(760px, 100%);
+          display: flex;
+          flex-direction: column;
+          background: white;
+          border: 1px solid #d9d9d9;
+          border-radius: 10px;
+          overflow: hidden;
+        }
+
+        .print-labels-body {
+          flex: 1 1 auto;
+          min-height: 0;
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) 260px;
+        }
+
+        .print-labels-preview {
+          min-height: 0;
+          overflow: auto;
+          padding: 20px;
+          background: #f4f4f4;
+        }
+
+        .print-labels-status {
+          margin: 0;
+          font-size: 13px;
+          color: #6d7175;
+        }
+
+        .print-labels-sidebar {
+          border-left: 1px solid #e5e5e5;
+          padding: 20px 18px;
+          background: white;
+        }
+
+        .print-labels-sidebar-title {
+          font-size: 14px;
+          font-weight: 600;
+          margin-bottom: 14px;
+        }
+
+        .print-labels-option {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          font-size: 13px;
+        }
+
+        .print-labels-footer {
+          display: flex;
+          justify-content: flex-end;
+          gap: 10px;
+          padding: 14px 18px;
+          border-top: 1px solid #e5e5e5;
+          background: white;
+        }
+
+        .print-labels-cancel,
+        .print-labels-continue {
+          height: 36px;
+          padding: 0 16px;
+          border-radius: 6px;
+          font-size: 13px;
+          cursor: pointer;
+        }
+
+        .print-labels-cancel {
+          border: 1px solid #c9c9c9;
+          background: white;
+        }
+
+        .print-labels-continue {
+          border: 1px solid #1a1a1a;
+          background: #1a1a1a;
+          color: white;
+        }
+
+        .print-labels-continue:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+        }
+
+        .shipping-slip {
+          max-width: 720px;
+          margin: 0 auto 16px;
+          padding: 24px 28px 16px;
+          background: white;
+          border: 1px solid #d8d8d8;
+          border-radius: 8px;
+          overflow: hidden;
+          color: #111;
+          font-family: Helvetica, Arial, sans-serif;
+          font-size: 14px;
+          line-height: 1.4;
+        }
+
+        .shipping-slip .slip-date {
+          float: right;
+          text-align: right;
+          margin: 0;
+        }
+
+        .shipping-slip .slip-shop {
+          margin: 0 0 1.5em;
+        }
+
+        .shipping-slip .shop-name {
+          font-size: 2em;
+        }
+
+        .shipping-slip hr {
+          clear: both;
+          border: none;
+          border-top: 2px solid #111;
+          margin: 0 0 1.2em;
+        }
+
+        .shipping-slip h3 {
+          margin: 0 0 1em;
+          font-size: 16px;
+        }
+
+        .shipping-slip .item-table {
+          width: 100%;
+          border-collapse: collapse;
+          table-layout: fixed;
+          margin: 0 0 1.5em;
+        }
+
+        .shipping-slip .col-image {
+          width: 120px;
+        }
+
+        .shipping-slip .col-sku {
+          width: 28%;
+        }
+
+        .shipping-slip .col-qty {
+          width: 18%;
+        }
+
+        .shipping-slip .item-table th,
+        .shipping-slip .item-table td {
+          border: none;
+          border-top: 1px solid #111;
+          border-bottom: 1px solid #111;
+          padding: 16px 12px;
+          vertical-align: middle;
+          text-align: left;
+        }
+
+        .shipping-slip .item-table th:first-child,
+        .shipping-slip .item-table td:first-child {
+          border-left: 1px solid #111;
+        }
+
+        .shipping-slip .item-table th:last-child,
+        .shipping-slip .item-table td:last-child {
+          border-right: 1px solid #111;
+        }
+
+        .shipping-slip .item-table th {
+          font-weight: 700;
+        }
+
+        .shipping-slip .item-table td.image-cell {
+          padding: 12px;
+        }
+
+        .shipping-slip .item-image {
+          width: 100px;
+          height: 100px;
+        }
+
+        .shipping-slip .item-image img {
+          width: 100px;
+          height: 100px;
+          object-fit: contain;
+          display: block;
+        }
+
+        .shipping-slip .thanks-under {
+          margin: 0 0 1.5em;
+          text-align: left;
+        }
+
+        .shipping-slip .box {
+          margin: 0 0 1em;
+          padding: 1em;
+          border: 1px solid #111;
+          min-height: 72px;
+        }
+
+        .shipping-slip .footer {
+          margin: 1em 0 0;
+          font-size: 14px;
+        }
+
+        @media (max-width: 800px) {
+          .print-labels-body {
+            grid-template-columns: 1fr;
+          }
+
+          .print-labels-sidebar {
+            border-left: none;
+            border-top: 1px solid #e5e5e5;
+          }
         }
 
         .generate-button {
@@ -1508,6 +2580,7 @@ export default function Index() {
           justify-content: space-between;
           gap: 24px;
           width: 100%;
+          flex-wrap: wrap;
         }
 
         .generate-print-info {
@@ -1537,14 +2610,16 @@ export default function Index() {
 
         .print-actions {
           display: flex;
+          flex-wrap: wrap;
           gap: 12px;
           margin-left: auto;
           flex-shrink: 0;
+          justify-content: flex-end;
         }
 
         .print-button {
           height: 50px;
-          min-width: 228px;
+          min-width: 220px;
 
           padding: 0 16px;
 
