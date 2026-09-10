@@ -180,7 +180,7 @@ const ORDER_CHANNEL_FIELDS = `
     }
     app {
       id
-      name
+      title
     }
   }
 `;

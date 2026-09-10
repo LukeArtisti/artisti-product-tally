@@ -216,7 +216,6 @@ function orderChannelValues(order: any) {
     channelInfo?.displayName,
     channelInfo?.app?.id,
     gidNumericId(channelInfo?.app?.id),
-    channelInfo?.app?.name,
     channelInfo?.app?.title,
     channelInfo?.channelDefinition?.id,
     gidNumericId(channelInfo?.channelDefinition?.id),
