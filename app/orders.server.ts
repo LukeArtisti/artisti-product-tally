@@ -1,5 +1,6 @@
 import {
   buildOrderStatusQuery,
+  EXTRA_SALES_CHANNELS,
   type OrderStatusValue,
   type SalesChannelOption,
 } from "./order-filters";
@@ -158,8 +159,64 @@ export async function fetchShopTimezone(admin: any): Promise<ShopTimezone> {
   };
 }
 
+const ORDER_CHANNEL_FIELDS = `
+  sourceName
+  publication {
+    id
+    name
+  }
+  app {
+    id
+    name
+  }
+  channelInformation {
+    channelId
+    displayName
+    channelDefinition {
+      id
+      handle
+      channelName
+      subChannelName
+    }
+    app {
+      id
+      name
+    }
+  }
+`;
+
+function channelNameKey(name: string) {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function mergeSalesChannels(lists: SalesChannelOption[][]) {
+  const seenIds = new Set<string>();
+  const seenNames = new Set<string>();
+  const channels: SalesChannelOption[] = [];
+
+  for (const list of lists) {
+    for (const channel of list) {
+      const nameKey = channelNameKey(channel.name);
+
+      if (
+        !channel.id ||
+        !channel.name ||
+        seenIds.has(channel.id) ||
+        seenNames.has(nameKey)
+      ) {
+        continue;
+      }
+
+      seenIds.add(channel.id);
+      seenNames.add(nameKey);
+      channels.push(channel);
+    }
+  }
+
+  return channels.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 function collectSalesChannels(publications: any[]) {
-  const seen = new Set<string>();
   const channels: SalesChannelOption[] = [];
 
   for (const publication of publications) {
@@ -168,11 +225,10 @@ function collectSalesChannels(publications: any[]) {
       publication?.name || publication?.catalog?.title || "",
     ).trim();
 
-    if (!id || !name || seen.has(id)) {
+    if (!id || !name) {
       continue;
     }
 
-    seen.add(id);
     channels.push({
       id,
       name,
@@ -180,22 +236,124 @@ function collectSalesChannels(publications: any[]) {
     });
   }
 
-  return channels.sort((a, b) => a.name.localeCompare(b.name));
+  return channels;
 }
 
-export async function fetchSalesChannels(
+function collectChannelDefinitions(groups: any[]) {
+  const channels: SalesChannelOption[] = [];
+
+  for (const group of groups) {
+    for (const definition of group?.channelDefinitions || []) {
+      const name = String(
+        definition?.channelName ||
+          definition?.subChannelName ||
+          group?.channelName ||
+          "",
+      ).trim();
+      const id =
+        gidNumericId(definition?.id) || String(definition?.handle || "").trim();
+
+      if (!id || !name) {
+        continue;
+      }
+
+      channels.push({
+        id,
+        name,
+        handle: String(definition?.handle || "").trim(),
+      });
+    }
+  }
+
+  return channels;
+}
+
+async function fetchPublicationChannels(
   admin: any,
-): Promise<SalesChannelOption[]> {
+  catalogType?: "APP" | "MARKET",
+) {
+  const publications: any[] = [];
+  let after: string | null = null;
+  let hasNextPage = true;
+  let pages = 0;
+
+  while (hasNextPage && pages < 8) {
+    const response: any = await admin.graphql(
+      catalogType
+        ? `#graphql
+            query SalesChannelPublications(
+              $first: Int!
+              $after: String
+              $catalogType: CatalogType
+            ) {
+              publications(first: $first, after: $after, catalogType: $catalogType) {
+                nodes {
+                  id
+                  name
+                  catalog {
+                    title
+                  }
+                }
+                pageInfo {
+                  hasNextPage
+                  endCursor
+                }
+              }
+            }`
+        : `#graphql
+            query SalesChannelPublications($first: Int!, $after: String) {
+              publications(first: $first, after: $after) {
+                nodes {
+                  id
+                  name
+                  catalog {
+                    title
+                  }
+                }
+                pageInfo {
+                  hasNextPage
+                  endCursor
+                }
+              }
+            }`,
+      {
+        variables: {
+          first: 50,
+          after,
+          ...(catalogType ? { catalogType } : {}),
+        },
+      },
+    );
+
+    const data = await response.json();
+    const connection = data.data?.publications;
+
+    if (data.errors || !connection) {
+      break;
+    }
+
+    publications.push(...(connection.nodes || []));
+    hasNextPage = Boolean(connection.pageInfo?.hasNextPage);
+    after = connection.pageInfo?.endCursor || null;
+    pages += 1;
+  }
+
+  return collectSalesChannels(publications);
+}
+
+async function fetchChannelDefinitionChannels(admin: any) {
   try {
     const response: any = await admin.graphql(
       `#graphql
-        query SalesChannels {
-          publications(first: 50) {
-            nodes {
-              id
-              name
-              catalog {
-                title
+        query ShopChannelDefinitions {
+          shop {
+            availableChannelDefinitionsByChannel {
+              channelName
+              channelDefinitions {
+                id
+                handle
+                channelName
+                subChannelName
               }
             }
           }
@@ -203,15 +361,20 @@ export async function fetchSalesChannels(
     );
 
     const data = await response.json();
-    const channels = collectSalesChannels(data.data?.publications?.nodes || []);
 
-    if (channels.length > 0) {
-      return channels;
+    if (data.errors) {
+      return [];
     }
-  } catch {
-    // Fall through to the product-publication lookup.
-  }
 
+    return collectChannelDefinitions(
+      data.data?.shop?.availableChannelDefinitionsByChannel || [],
+    );
+  } catch {
+    return [];
+  }
+}
+
+async function fetchProductPublicationChannels(admin: any) {
   try {
     const response: any = await admin.graphql(
       `#graphql
@@ -232,6 +395,11 @@ export async function fetchSalesChannels(
     );
 
     const data = await response.json();
+
+    if (data.errors) {
+      return [];
+    }
+
     const publications = (data.data?.products?.nodes || []).flatMap(
       (product: any) =>
         (product?.resourcePublications?.nodes || []).map(
@@ -243,6 +411,29 @@ export async function fetchSalesChannels(
   } catch {
     return [];
   }
+}
+
+export async function fetchSalesChannels(
+  admin: any,
+): Promise<SalesChannelOption[]> {
+  const [allPublications, appPublications, definitions] = await Promise.all([
+    fetchPublicationChannels(admin).catch(() => []),
+    fetchPublicationChannels(admin, "APP").catch(() => []),
+    fetchChannelDefinitionChannels(admin),
+  ]);
+
+  const productPublications =
+    allPublications.length + appPublications.length === 0
+      ? await fetchProductPublicationChannels(admin)
+      : [];
+
+  return mergeSalesChannels([
+    allPublications,
+    appPublications,
+    definitions,
+    productPublications,
+    EXTRA_SALES_CHANNELS,
+  ]);
 }
 
 export async function fetchAllOrders(
@@ -277,15 +468,7 @@ export async function fetchAllOrders(
               cancelledAt
               displayFinancialStatus
               displayFulfillmentStatus
-              sourceName
-              publication {
-                id
-                name
-              }
-              app {
-                id
-                name
-              }
+              ${ORDER_CHANNEL_FIELDS}
 
               lineItems(first: 250) {
                 nodes {
@@ -373,15 +556,7 @@ export async function fetchOrdersSummary(
               cancelledAt
               displayFinancialStatus
               displayFulfillmentStatus
-              sourceName
-              publication {
-                id
-                name
-              }
-              app {
-                id
-                name
-              }
+              ${ORDER_CHANNEL_FIELDS}
               currentSubtotalLineItemsQuantity
               subtotalLineItemsQuantity
             }
@@ -559,15 +734,7 @@ const SHIPPING_LABEL_ORDER_FIELDS = `
   cancelledAt
   displayFinancialStatus
   displayFulfillmentStatus
-  sourceName
-  publication {
-    id
-    name
-  }
-  app {
-    id
-    name
-  }
+  ${ORDER_CHANNEL_FIELDS}
   customAttributes {
     key
     value

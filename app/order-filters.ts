@@ -4,6 +4,19 @@ export type SalesChannelOption = {
   handle: string;
 };
 
+export const EXTRA_SALES_CHANNELS: SalesChannelOption[] = [
+  {
+    id: "recharge-subscriptions",
+    name: "Recharge Subscriptions",
+    handle: "recharge",
+  },
+  {
+    id: "beanz-connect-integration",
+    name: "Beanz Connect Integration",
+    handle: "beanz-connect",
+  },
+];
+
 export const ORDER_STATUS_OPTIONS = [
   { value: "unfulfilled", label: "Unfulfilled" },
   { value: "unpaid", label: "Unpaid" },
@@ -174,12 +187,19 @@ const SOURCE_NAME_ALIASES: Record<string, string[]> = {
   shopify_draft_order: ["draft orders", "draft order", "draft_orders"],
   iphone: ["shop", "shopify app", "buy button"],
   android: ["shop", "shopify app", "buy button"],
-  subscription_contract: ["subscriptions", "subscription"],
+  subscription_contract: [
+    "subscriptions",
+    "subscription",
+    "recharge",
+    "recharge subscriptions",
+  ],
+  recharge: ["recharge subscriptions", "subscriptions"],
 };
 
 function orderChannelValues(order: any) {
   const sourceName = String(order?.sourceName || "").toLowerCase();
   const aliasNames = SOURCE_NAME_ALIASES[sourceName] || [];
+  const channelInfo = order?.channelInformation;
 
   return [
     gidNumericId(order?.publication?.id),
@@ -191,8 +211,18 @@ function orderChannelValues(order: any) {
     order?.app?.name,
     order?.attribution?.handle,
     order?.attribution?.displayName,
-    order?.channelInformation?.channelDefinition?.handle,
-    order?.channelInformation?.channelDefinition?.channelName,
+    channelInfo?.channelId,
+    gidNumericId(channelInfo?.channelId),
+    channelInfo?.displayName,
+    channelInfo?.app?.id,
+    gidNumericId(channelInfo?.app?.id),
+    channelInfo?.app?.name,
+    channelInfo?.app?.title,
+    channelInfo?.channelDefinition?.id,
+    gidNumericId(channelInfo?.channelDefinition?.id),
+    channelInfo?.channelDefinition?.handle,
+    channelInfo?.channelDefinition?.channelName,
+    channelInfo?.channelDefinition?.subChannelName,
   ]
     .filter(Boolean)
     .map((value) => String(value).toLowerCase());
