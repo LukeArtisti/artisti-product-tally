@@ -229,6 +229,364 @@ function MultiSelectFilter({
   );
 }
 
+function pad2(value: number) {
+  return String(value).padStart(2, "0");
+}
+
+function normalizeTimeValue(value: string) {
+  const match = value.match(/^(\d{1,2}):(\d{2})/);
+  if (!match) return value;
+
+  const hours = Math.min(23, Math.max(0, Number(match[1])));
+  const minutes = Math.min(59, Math.max(0, Number(match[2])));
+
+  return `${pad2(hours)}:${pad2(minutes)}`;
+}
+
+function parseTime12h(value: string) {
+  const normalized = normalizeTimeValue(value);
+  const [hourStr, minuteStr] = normalized.split(":");
+  const hour24 = Number(hourStr);
+
+  return {
+    hour12: hour24 % 12 === 0 ? 12 : hour24 % 12,
+    minutes: minuteStr,
+    period: (hour24 >= 12 ? "PM" : "AM") as "AM" | "PM",
+  };
+}
+
+function toTime24(hour12: number, minutes: string, period: "AM" | "PM") {
+  const hour = hour12 % 12;
+  const hour24 = period === "PM" ? hour + 12 : hour;
+
+  return `${pad2(hour24)}:${minutes}`;
+}
+
+function formatTime12h(value: string) {
+  const { hour12, minutes, period } = parseTime12h(value);
+
+  return `${hour12}:${minutes} ${period}`;
+}
+
+function DatePickerField({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [view, setView] = useState(() => {
+    const [year, month] = value.split("-").map(Number);
+    return { year: year || new Date().getFullYear(), month: month || 1 };
+  });
+  const [menuStyle, setMenuStyle] = useState<CSSProperties>({});
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const selected = value.split("-").map(Number);
+  const selectedYear = selected[0];
+  const selectedMonth = selected[1];
+  const selectedDay = selected[2];
+  const daysInMonth = new Date(Date.UTC(view.year, view.month, 0)).getUTCDate();
+  const firstWeekday = new Date(Date.UTC(view.year, view.month - 1, 1)).getUTCDay();
+  const monthLabel = new Date(Date.UTC(view.year, view.month - 1, 1)).toLocaleDateString(
+    "en-US",
+    { month: "long", year: "numeric", timeZone: "UTC" },
+  );
+
+  useLayoutEffect(() => {
+    if (!isOpen) return;
+
+    const [year, month] = value.split("-").map(Number);
+    if (year && month) {
+      setView({ year, month });
+    }
+
+    const updateMenuPosition = () => {
+      const trigger = triggerRef.current;
+      if (!trigger) return;
+
+      const rect = trigger.getBoundingClientRect();
+      const padding = 8;
+      const spaceBelow = window.innerHeight - rect.bottom - padding;
+      const spaceAbove = rect.top - padding;
+      const openUp = spaceBelow < 280 && spaceAbove > spaceBelow;
+
+      setMenuStyle({
+        position: "fixed",
+        left: Math.min(rect.left, window.innerWidth - 280),
+        width: 268,
+        top: openUp ? undefined : rect.bottom + 4,
+        bottom: openUp ? window.innerHeight - rect.top + 4 : undefined,
+        zIndex: 10000,
+      });
+    };
+
+    updateMenuPosition();
+    window.addEventListener("resize", updateMenuPosition);
+    window.addEventListener("scroll", updateMenuPosition, true);
+
+    return () => {
+      window.removeEventListener("resize", updateMenuPosition);
+      window.removeEventListener("scroll", updateMenuPosition, true);
+    };
+  }, [isOpen, value]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (
+        triggerRef.current?.contains(target) ||
+        menuRef.current?.contains(target)
+      ) {
+        return;
+      }
+
+      setIsOpen(false);
+    };
+
+    document.addEventListener("mousedown", handlePointerDown);
+
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, [isOpen]);
+
+  const shiftMonth = (delta: number) => {
+    setView((current) => {
+      const next = new Date(Date.UTC(current.year, current.month - 1 + delta, 1));
+      return { year: next.getUTCFullYear(), month: next.getUTCMonth() + 1 };
+    });
+  };
+
+  const menu =
+    isOpen && typeof document !== "undefined"
+      ? createPortal(
+          <div className="calendar-menu" ref={menuRef} style={menuStyle}>
+            <div className="calendar-header">
+              <button type="button" onClick={() => shiftMonth(-1)} aria-label="Previous month">
+                ‹
+              </button>
+              <span>{monthLabel}</span>
+              <button type="button" onClick={() => shiftMonth(1)} aria-label="Next month">
+                ›
+              </button>
+            </div>
+            <div className="calendar-weekdays">
+              {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((day) => (
+                <span key={day}>{day}</span>
+              ))}
+            </div>
+            <div className="calendar-grid">
+              {Array.from({ length: firstWeekday }, (_, index) => (
+                <span key={`empty-${index}`} />
+              ))}
+              {Array.from({ length: daysInMonth }, (_, index) => {
+                const day = index + 1;
+                const isSelected =
+                  selectedYear === view.year &&
+                  selectedMonth === view.month &&
+                  selectedDay === day;
+
+                return (
+                  <button
+                    key={day}
+                    type="button"
+                    className={isSelected ? "is-selected" : ""}
+                    onClick={() => {
+                      onChange(`${view.year}-${pad2(view.month)}-${pad2(day)}`);
+                      setIsOpen(false);
+                    }}
+                  >
+                    {day}
+                  </button>
+                );
+              })}
+            </div>
+          </div>,
+          document.body,
+        )
+      : null;
+
+  return (
+    <div>
+      <button
+        type="button"
+        className="datetime-trigger"
+        ref={triggerRef}
+        onClick={() => setIsOpen((open) => !open)}
+        aria-expanded={isOpen}
+      >
+        <span>{value}</span>
+        <span className="datetime-icon" aria-hidden="true">
+          <svg viewBox="0 0 20 20" focusable="false">
+            <path
+              fill="currentColor"
+              d="M6 2a1 1 0 0 1 1 1v1h6V3a1 1 0 1 1 2 0v1h1a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h1V3a1 1 0 0 1 1-1Zm8 4H4v2h12V6Zm0 4H4v6h12v-6Z"
+            />
+          </svg>
+        </span>
+      </button>
+      {menu}
+    </div>
+  );
+}
+
+function TimePickerField({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [menuStyle, setMenuStyle] = useState<CSSProperties>({});
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const hoursRef = useRef<HTMLDivElement>(null);
+  const minutesRef = useRef<HTMLDivElement>(null);
+  const { hour12, minutes, period } = parseTime12h(value);
+
+  useLayoutEffect(() => {
+    if (!isOpen) return;
+
+    const updateMenuPosition = () => {
+      const trigger = triggerRef.current;
+      if (!trigger) return;
+
+      const rect = trigger.getBoundingClientRect();
+      const padding = 8;
+      const spaceBelow = window.innerHeight - rect.bottom - padding;
+      const spaceAbove = rect.top - padding;
+      const openUp = spaceBelow < 220 && spaceAbove > spaceBelow;
+
+      setMenuStyle({
+        position: "fixed",
+        left: rect.left,
+        width: Math.max(rect.width, 210),
+        top: openUp ? undefined : rect.bottom + 4,
+        bottom: openUp ? window.innerHeight - rect.top + 4 : undefined,
+        zIndex: 10000,
+      });
+    };
+
+    updateMenuPosition();
+    window.addEventListener("resize", updateMenuPosition);
+    window.addEventListener("scroll", updateMenuPosition, true);
+
+    return () => {
+      window.removeEventListener("resize", updateMenuPosition);
+      window.removeEventListener("scroll", updateMenuPosition, true);
+    };
+  }, [isOpen]);
+
+  useLayoutEffect(() => {
+    if (!isOpen) return;
+
+    const selectedHour = hoursRef.current?.querySelector(".is-selected");
+    const selectedMinute = minutesRef.current?.querySelector(".is-selected");
+    selectedHour?.scrollIntoView({ block: "center" });
+    selectedMinute?.scrollIntoView({ block: "center" });
+  }, [isOpen, hour12, minutes]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (
+        triggerRef.current?.contains(target) ||
+        menuRef.current?.contains(target)
+      ) {
+        return;
+      }
+
+      setIsOpen(false);
+    };
+
+    document.addEventListener("mousedown", handlePointerDown);
+
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, [isOpen]);
+
+  const menu =
+    isOpen && typeof document !== "undefined"
+      ? createPortal(
+          <div className="time-menu" ref={menuRef} style={menuStyle}>
+            <div className="time-column" ref={hoursRef}>
+              {Array.from({ length: 12 }, (_, index) => {
+                const nextHour = index + 1;
+                return (
+                  <button
+                    key={nextHour}
+                    type="button"
+                    className={nextHour === hour12 ? "is-selected" : ""}
+                    onClick={() => onChange(toTime24(nextHour, minutes, period))}
+                  >
+                    {nextHour}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="time-column" ref={minutesRef}>
+              {Array.from({ length: 60 }, (_, minute) => {
+                const next = pad2(minute);
+                return (
+                  <button
+                    key={next}
+                    type="button"
+                    className={next === minutes ? "is-selected" : ""}
+                    onClick={() => onChange(toTime24(hour12, next, period))}
+                  >
+                    {next}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="time-column time-period">
+              {(["AM", "PM"] as const).map((nextPeriod) => (
+                <button
+                  key={nextPeriod}
+                  type="button"
+                  className={nextPeriod === period ? "is-selected" : ""}
+                  onClick={() => {
+                    onChange(toTime24(hour12, minutes, nextPeriod));
+                    setIsOpen(false);
+                  }}
+                >
+                  {nextPeriod}
+                </button>
+              ))}
+            </div>
+          </div>,
+          document.body,
+        )
+      : null;
+
+  return (
+    <div>
+      <button
+        type="button"
+        className="datetime-trigger"
+        ref={triggerRef}
+        onClick={() => setIsOpen((open) => !open)}
+        aria-expanded={isOpen}
+      >
+        <span>{formatTime12h(value)}</span>
+        <span className="datetime-icon" aria-hidden="true">
+          <svg viewBox="0 0 20 20" focusable="false">
+            <path
+              fill="currentColor"
+              d="M10 2a8 8 0 1 1 0 16 8 8 0 0 1 0-16Zm0 2a6 6 0 1 0 0 12 6 6 0 0 0 0-12Zm.75 2v3.19l2.28 2.28a.75.75 0 1 1-1.06 1.06l-2.5-2.5A.75.75 0 0 1 9.25 9.5V6A.75.75 0 0 1 10.75 6Z"
+            />
+          </svg>
+        </span>
+      </button>
+      {menu}
+    </div>
+  );
+}
+
 function escapeHtml(value: string) {
   return value
     .replace(/&/g, "&amp;")
@@ -956,20 +1314,14 @@ export default function Index() {
                           <strong>From</strong>
                         </s-text>
 
-                        <input
-                          type="date"
+                        <DatePickerField
                           value={fromDate}
-                          onChange={(event) =>
-                            setFromDate(event.target.value)
-                          }
+                          onChange={setFromDate}
                         />
 
-                        <input
-                          type="time"
+                        <TimePickerField
                           value={fromTime}
-                          onChange={(event) =>
-                            setFromTime(event.target.value)
-                          }
+                          onChange={setFromTime}
                         />
 
                       </s-stack>
@@ -982,20 +1334,14 @@ export default function Index() {
                           <strong>To</strong>
                         </s-text>
 
-                        <input
-                          type="date"
+                        <DatePickerField
                           value={toDate}
-                          onChange={(event) =>
-                            setToDate(event.target.value)
-                          }
+                          onChange={setToDate}
                         />
 
-                        <input
-                          type="time"
+                        <TimePickerField
                           value={toTime}
-                          onChange={(event) =>
-                            setToTime(event.target.value)
-                          }
+                          onChange={setToTime}
                         />
 
                       </s-stack>
@@ -1079,11 +1425,11 @@ export default function Index() {
                         <strong>Note:</strong>{" "}
                         The tally will include orders created from{" "}
                         <b>
-                          {fromDate} {fromTime}
+                          {fromDate} {formatTime12h(fromTime)}
                         </b>{" "}
                         to{" "}
                         <b>
-                          {toDate} {toTime}
+                          {toDate} {formatTime12h(toTime)}
                         </b>.
                       </div>
 
@@ -1523,7 +1869,7 @@ export default function Index() {
                     </div>
 
                     <div className="summary-time">
-                      {fromTime}
+                      {formatTime12h(fromTime)}
                     </div>
 
                     <div className="summary-to">
@@ -1535,7 +1881,7 @@ export default function Index() {
                     </div>
 
                     <div className="summary-time">
-                      {toTime}
+                      {formatTime12h(toTime)}
                     </div>
 
                     <div className="timezone">
@@ -1631,7 +1977,8 @@ export default function Index() {
             </div>
 
             <p className="included-orders-popup-range">
-              Orders created from {fromDate} {fromTime} to {toDate} {toTime}{" "}
+              Orders created from {fromDate} {formatTime12h(fromTime)} to {toDate}{" "}
+              {formatTime12h(toTime)}{" "}
               ({timezoneLabel})
               {!isLoadingOrders && includedOrders.length > 0
                 ? ` · ${selectedOrderCount} of ${includedOrders.length} selected`
@@ -1955,7 +2302,8 @@ export default function Index() {
           background: white;
         }
 
-        .date-tally-box input {
+        .date-tally-box input,
+        .datetime-trigger {
           width: 100%;
           height: 38px;
           border: 1px solid #b5b5b5;
@@ -1963,6 +2311,117 @@ export default function Index() {
           padding: 0 10px;
           font-size: 14px;
           background: white;
+        }
+
+        .datetime-trigger {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px;
+          cursor: pointer;
+          text-align: left;
+        }
+
+        .datetime-icon {
+          display: flex;
+          color: #6d7175;
+          flex-shrink: 0;
+        }
+
+        .datetime-icon svg {
+          width: 16px;
+          height: 16px;
+          display: block;
+        }
+
+        .calendar-menu,
+        .time-menu {
+          border: 1px solid #d9d9d9;
+          border-radius: 8px;
+          background: white;
+          box-shadow: 0 8px 18px rgba(0, 0, 0, 0.12);
+        }
+
+        .calendar-menu {
+          padding: 10px;
+        }
+
+        .calendar-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          margin-bottom: 8px;
+          font-size: 13px;
+          font-weight: 600;
+        }
+
+        .calendar-header button {
+          width: 28px;
+          height: 28px;
+          border: 1px solid #d9d9d9;
+          border-radius: 6px;
+          background: white;
+          cursor: pointer;
+        }
+
+        .calendar-weekdays,
+        .calendar-grid {
+          display: grid;
+          grid-template-columns: repeat(7, 1fr);
+          gap: 2px;
+          text-align: center;
+        }
+
+        .calendar-weekdays span {
+          font-size: 11px;
+          color: #6d7175;
+          padding: 4px 0;
+        }
+
+        .calendar-grid button {
+          height: 30px;
+          border: none;
+          border-radius: 6px;
+          background: transparent;
+          font-size: 12px;
+          cursor: pointer;
+        }
+
+        .calendar-grid button:hover,
+        .time-column button:hover {
+          background: #f6f6f6;
+        }
+
+        .calendar-grid button.is-selected,
+        .time-column button.is-selected {
+          background: #303030;
+          color: white;
+        }
+
+        .time-menu {
+          display: grid;
+          grid-template-columns: 1fr 1fr 0.8fr;
+          height: 220px;
+          overflow: hidden;
+        }
+
+        .time-column {
+          overflow: auto;
+          padding: 6px 0;
+        }
+
+        .time-column + .time-column {
+          border-left: 1px solid #eee;
+        }
+
+        .time-column button {
+          display: block;
+          width: 100%;
+          height: 28px;
+          border: none;
+          background: transparent;
+          font-size: 13px;
+          cursor: pointer;
         }
 
 
