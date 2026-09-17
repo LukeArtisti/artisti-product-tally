@@ -166,15 +166,6 @@ const ORDER_FULFILLMENT_FIELDS = `
   fulfillments(first: 5) {
     displayStatus
   }
-  fulfillmentOrders(first: 3) {
-    nodes {
-      fulfillments(first: 2) {
-        nodes {
-          displayStatus
-        }
-      }
-    }
-  }
 `;
 
 const ORDER_CHANNEL_FIELDS = `
@@ -493,6 +484,8 @@ export async function fetchAllOrders(
                   title
                   name
                   quantity
+                  currentQuantity
+                  unfulfilledQuantity
                   sku
                   variantTitle
                   product {
@@ -577,6 +570,13 @@ export async function fetchOrdersSummary(
               ${ORDER_CHANNEL_FIELDS}
               currentSubtotalLineItemsQuantity
               subtotalLineItemsQuantity
+              lineItems(first: 15) {
+                nodes {
+                  currentQuantity
+                  quantity
+                  unfulfilledQuantity
+                }
+              }
             }
 
             pageInfo {
@@ -587,7 +587,7 @@ export async function fetchOrdersSummary(
         }`,
       {
         variables: {
-          first: 50,
+          first: 25,
           after,
           query: orderQuery,
         },

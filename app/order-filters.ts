@@ -205,12 +205,50 @@ function orderFulfillments(order: any) {
   ];
 }
 
+function orderLineItems(order: any) {
+  return asNodes(order?.lineItems);
+}
+
+function orderHasNoRemainingFulfillment(order: any) {
+  const items = orderLineItems(order);
+
+  if (items.length === 0) {
+    return false;
+  }
+
+  let currentQuantity = 0;
+  let unfulfilledQuantity = 0;
+
+  for (const item of items) {
+    currentQuantity += Number(item?.currentQuantity ?? item?.quantity ?? 0);
+    unfulfilledQuantity += Number(item?.unfulfilledQuantity ?? 0);
+  }
+
+  return currentQuantity > 0 && unfulfilledQuantity <= 0;
+}
+
 function orderIsReadyForPickup(order: any) {
   if (statusIsReadyForPickup(order?.displayFulfillmentStatus)) {
     return true;
   }
 
-  return orderFulfillments(order).some(fulfillmentIsReadyForPickup);
+  if (orderFulfillments(order).some(fulfillmentIsReadyForPickup)) {
+    return true;
+  }
+
+  const status = normalizeStatus(order?.displayFulfillmentStatus);
+  const looksUnfulfilled = [
+    "UNFULFILLED",
+    "IN_PROGRESS",
+    "PENDING_FULFILLMENT",
+    "OPEN",
+  ].includes(status);
+
+  if (!looksUnfulfilled) {
+    return false;
+  }
+
+  return orderHasNoRemainingFulfillment(order);
 }
 
 function orderIsOpen(order: any) {
