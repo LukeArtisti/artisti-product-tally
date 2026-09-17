@@ -17,13 +17,11 @@ import {
   type OrderStatusValue,
 } from "../order-filters";
 import {
-  buildOrderRangeQuery,
   buildTallyOrderQuery,
   fetchAllOrders,
   fetchSalesChannels,
   fetchShopTimezone,
   gidNumericId,
-  withReadyForPickupFlags,
 } from "../orders.server";
 import { SHOP_ABN } from "../shipping-label";
 import type {
@@ -962,20 +960,8 @@ export async function action({ request }: ActionFunctionArgs) {
     const excludedOrderIds = parseExcludedOrderIds(
       formData.get("excludedOrderIds"),
     );
-    const rangeQuery = buildOrderRangeQuery(
-      fromDate,
-      fromTime,
-      toDate,
-      toTime,
-      shop.ianaTimezone,
-    );
     const orders = filterOrdersBySelection(
-      await withReadyForPickupFlags(
-        admin,
-        session,
-        await fetchAllOrders(admin, orderQuery),
-        rangeQuery,
-      ),
+      await fetchAllOrders(admin, orderQuery),
       statuses,
       salesChannels,
       selectedChannelIds,

@@ -19,7 +19,7 @@ export const EXTRA_SALES_CHANNELS: SalesChannelOption[] = [
 
 export const ORDER_STATUS_OPTIONS = [
   { value: "unfulfilled", label: "Unfulfilled" },
-  { value: "ready_for_pickup", label: "Ready for pickup" },
+  { value: "pickup", label: "Pick up" },
   { value: "on_hold", label: "On hold" },
   { value: "unpaid", label: "Unpaid" },
   { value: "open", label: "Open" },
@@ -32,6 +32,14 @@ export type OrderStatusValue = (typeof ORDER_STATUS_OPTIONS)[number]["value"];
 const ORDER_STATUS_VALUES = new Set<string>(
   ORDER_STATUS_OPTIONS.map((option) => option.value),
 );
+
+function normalizeSavedStatus(value: string): OrderStatusValue | null {
+  if (value === "ready_for_pickup") {
+    return "pickup";
+  }
+
+  return ORDER_STATUS_VALUES.has(value) ? (value as OrderStatusValue) : null;
+}
 
 function quoteQueryValue(value: string) {
   return `'${value.replace(/'/g, "\\'")}'`;
@@ -52,10 +60,10 @@ export function parseOrderStatuses(value: FormDataEntryValue | string | null) {
       return ["open"] as OrderStatusValue[];
     }
 
-    const statuses = parsed.filter(
-      (item): item is OrderStatusValue =>
-        typeof item === "string" && ORDER_STATUS_VALUES.has(item),
-    );
+    const statuses = parsed
+      .filter((item): item is string => typeof item === "string")
+      .map(normalizeSavedStatus)
+      .filter((item): item is OrderStatusValue => item !== null);
 
     return statuses.length > 0 ? statuses : (["open"] as OrderStatusValue[]);
   } catch {
@@ -81,7 +89,7 @@ export function parseSalesChannelIds(value: FormDataEntryValue | string | null) 
 
 const STATUS_FACETS: OrderStatusValue[] = [
   "unfulfilled",
-  "ready_for_pickup",
+  "pickup",
   "on_hold",
   "unpaid",
   "open",
@@ -104,11 +112,11 @@ export function buildOrderStatusQuery(statuses: OrderStatusValue[]) {
   }
 
   if (statuses.length === 1 && statuses[0] === "open") {
-    return "status:open AND -fulfillment_status:ready_for_pickup";
+    return "status:open";
   }
 
-  if (statuses.length === 1 && statuses[0] === "ready_for_pickup") {
-    return "fulfillment_status:ready_for_pickup";
+  if (statuses.length === 1 && statuses[0] === "pickup") {
+    return "status:open";
   }
 
   if (statuses.length === 1 && statuses[0] === "archived") {
@@ -116,13 +124,6 @@ export function buildOrderStatusQuery(statuses: OrderStatusValue[]) {
   }
 
   return "(status:open OR status:closed OR status:cancelled)";
-}
-
-function gidNumericId(gid: string | null | undefined) {
-  if (!gid) return "";
-
-  const match = String(gid).match(/(\d+)\s*$/);
-  return match?.[1] || "";
 }
 
 function asNodes(value: any): any[] {
@@ -150,109 +151,31 @@ function normalizeStatus(value: unknown) {
     .replace(/[\s-]+/g, "_");
 }
 
-function statusIsReadyForPickup(value: unknown) {
-  const status = normalizeStatus(value);
+function deliveryTokens(order: any) {
+  const lines = asNodes(order?.shippingLines);
 
-  return status === "READY_FOR_PICKUP" || status === "READYFORPICKUP";
-}
-
-function fulfillmentIsComplete(fulfillment: any) {
-  const display = normalizeStatus(fulfillment?.displayStatus);
-
-  if (
-    display === "PICKED_UP" ||
-    display === "DELIVERED" ||
-    display === "FULFILLED" ||
-    display === "MARKED_AS_FULFILLED"
-  ) {
-    return true;
-  }
-
-  if (fulfillment?.deliveredAt) {
-    return true;
-  }
-
-  return asNodes(fulfillment?.events).some((event) => {
-    const status = normalizeStatus(event?.status);
-
-    return status === "PICKED_UP" || status === "DELIVERED";
-  });
-}
-
-function fulfillmentIsReadyForPickup(fulfillment: any) {
-  if (!fulfillment || fulfillmentIsComplete(fulfillment)) {
-    return false;
-  }
-
-  if (
-    statusIsReadyForPickup(fulfillment?.displayStatus) ||
-    statusIsReadyForPickup(fulfillment?.shipmentStatus)
-  ) {
-    return true;
-  }
-
-  return asNodes(fulfillment?.events).some((event) =>
-    statusIsReadyForPickup(event?.status),
-  );
-}
-
-function orderFulfillments(order: any) {
   return [
-    ...asNodes(order?.fulfillments),
-    ...asNodes(order?.fulfillmentOrders).flatMap((fulfillmentOrder) =>
-      asNodes(fulfillmentOrder?.fulfillments),
-    ),
-  ];
+    order?.shippingMethod,
+    order?.deliveryMethod,
+    ...lines.map((line) => line?.title),
+    ...lines.map((line) => line?.code),
+    ...lines.map((line) => line?.source),
+  ]
+    .map((value) =>
+      String(value || "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, ""),
+    )
+    .filter(Boolean);
 }
 
-function orderLineItems(order: any) {
-  return asNodes(order?.lineItems);
-}
-
-function orderHasNoRemainingFulfillment(order: any) {
-  const items = orderLineItems(order);
-
-  if (items.length === 0) {
-    return false;
-  }
-
-  let currentQuantity = 0;
-  let unfulfilledQuantity = 0;
-
-  for (const item of items) {
-    currentQuantity += Number(item?.currentQuantity ?? item?.quantity ?? 0);
-    unfulfilledQuantity += Number(item?.unfulfilledQuantity ?? 0);
-  }
-
-  return currentQuantity > 0 && unfulfilledQuantity <= 0;
-}
-
-function orderIsReadyForPickup(order: any) {
-  if (order?.readyForPickup === true) {
-    return true;
-  }
-
-  if (statusIsReadyForPickup(order?.displayFulfillmentStatus)) {
-    return true;
-  }
-
-  if (orderFulfillments(order).some(fulfillmentIsReadyForPickup)) {
-    return true;
-  }
-
-  const status = normalizeStatus(order?.displayFulfillmentStatus);
-  const looksUnfulfilled = [
-    "UNFULFILLED",
-    "IN_PROGRESS",
-    "PENDING_FULFILLMENT",
-    "OPEN",
-  ].includes(status);
-
-  if (!looksUnfulfilled) {
-    return false;
-  }
-
-  return orderHasNoRemainingFulfillment(order);
+function orderIsPickup(order: any) {
+  return deliveryTokens(order).some(
+    (token) =>
+      token.includes("pickupinstore") ||
+      token.includes("localpickup") ||
+      token.includes("pickup"),
+  );
 }
 
 function orderIsOpen(order: any) {
@@ -260,7 +183,7 @@ function orderIsOpen(order: any) {
     !order?.cancelledAt &&
     !order?.closed &&
     !order?.closedAt &&
-    !orderIsReadyForPickup(order)
+    !orderIsPickup(order)
   );
 }
 
@@ -269,7 +192,7 @@ function orderIsArchived(order: any) {
 }
 
 function orderIsUnfulfilled(order: any) {
-  if (orderIsReadyForPickup(order)) {
+  if (orderIsPickup(order)) {
     return false;
   }
 
@@ -289,8 +212,8 @@ function orderIsOnHold(order: any) {
 }
 
 export function orderStatusLabel(order: any) {
-  if (orderIsReadyForPickup(order)) {
-    return "Ready for pickup";
+  if (orderIsPickup(order)) {
+    return "Pick up";
   }
 
   if (orderIsOnHold(order)) {
@@ -316,7 +239,7 @@ export function orderStatusLabel(order: any) {
     OPEN: "Open",
     REQUEST_DECLINED: "Request declined",
     RESTOCKED: "Restocked",
-    READY_FOR_PICKUP: "Ready for pickup",
+    READY_FOR_PICKUP: "Pick up",
   };
 
   return (
@@ -349,7 +272,7 @@ function orderMatchesStatuses(order: any, statuses: OrderStatusValue[]) {
     if (status === "open") return orderIsOpen(order);
     if (status === "archived") return orderIsArchived(order);
     if (status === "unfulfilled") return orderIsUnfulfilled(order);
-    if (status === "ready_for_pickup") return orderIsReadyForPickup(order);
+    if (status === "pickup") return orderIsPickup(order);
     if (status === "on_hold") return orderIsOnHold(order);
     if (status === "unpaid") return orderIsUnpaid(order);
     return false;
