@@ -104,7 +104,11 @@ export function buildOrderStatusQuery(statuses: OrderStatusValue[]) {
   }
 
   if (statuses.length === 1 && statuses[0] === "open") {
-    return "status:open";
+    return "status:open AND -fulfillment_status:ready_for_pickup";
+  }
+
+  if (statuses.length === 1 && statuses[0] === "ready_for_pickup") {
+    return "fulfillment_status:ready_for_pickup";
   }
 
   if (statuses.length === 1 && statuses[0] === "archived") {
@@ -121,8 +125,101 @@ function gidNumericId(gid: string | null | undefined) {
   return match?.[1] || "";
 }
 
+function asNodes(value: any): any[] {
+  if (Array.isArray(value)) {
+    return value;
+  }
+
+  if (Array.isArray(value?.nodes)) {
+    return value.nodes;
+  }
+
+  if (Array.isArray(value?.edges)) {
+    return value.edges
+      .map((edge: any) => edge?.node)
+      .filter(Boolean);
+  }
+
+  return [];
+}
+
+function normalizeStatus(value: unknown) {
+  return String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, "_");
+}
+
+function statusIsReadyForPickup(value: unknown) {
+  const status = normalizeStatus(value);
+
+  return status === "READY_FOR_PICKUP" || status === "READYFORPICKUP";
+}
+
+function fulfillmentIsComplete(fulfillment: any) {
+  const display = normalizeStatus(fulfillment?.displayStatus);
+
+  if (
+    display === "PICKED_UP" ||
+    display === "DELIVERED" ||
+    display === "FULFILLED" ||
+    display === "MARKED_AS_FULFILLED"
+  ) {
+    return true;
+  }
+
+  if (fulfillment?.deliveredAt) {
+    return true;
+  }
+
+  return asNodes(fulfillment?.events).some((event) => {
+    const status = normalizeStatus(event?.status);
+
+    return status === "PICKED_UP" || status === "DELIVERED";
+  });
+}
+
+function fulfillmentIsReadyForPickup(fulfillment: any) {
+  if (!fulfillment || fulfillmentIsComplete(fulfillment)) {
+    return false;
+  }
+
+  if (
+    statusIsReadyForPickup(fulfillment?.displayStatus) ||
+    statusIsReadyForPickup(fulfillment?.shipmentStatus)
+  ) {
+    return true;
+  }
+
+  return asNodes(fulfillment?.events).some((event) =>
+    statusIsReadyForPickup(event?.status),
+  );
+}
+
+function orderFulfillments(order: any) {
+  return [
+    ...asNodes(order?.fulfillments),
+    ...asNodes(order?.fulfillmentOrders).flatMap((fulfillmentOrder) =>
+      asNodes(fulfillmentOrder?.fulfillments),
+    ),
+  ];
+}
+
+function orderIsReadyForPickup(order: any) {
+  if (statusIsReadyForPickup(order?.displayFulfillmentStatus)) {
+    return true;
+  }
+
+  return orderFulfillments(order).some(fulfillmentIsReadyForPickup);
+}
+
 function orderIsOpen(order: any) {
-  return !order?.cancelledAt && !order?.closed && !order?.closedAt;
+  return (
+    !order?.cancelledAt &&
+    !order?.closed &&
+    !order?.closedAt &&
+    !orderIsReadyForPickup(order)
+  );
 }
 
 function orderIsArchived(order: any) {
@@ -130,7 +227,11 @@ function orderIsArchived(order: any) {
 }
 
 function orderIsUnfulfilled(order: any) {
-  const status = String(order?.displayFulfillmentStatus || "").toUpperCase();
+  if (orderIsReadyForPickup(order)) {
+    return false;
+  }
+
+  const status = normalizeStatus(order?.displayFulfillmentStatus);
 
   return [
     "UNFULFILLED",
@@ -142,37 +243,7 @@ function orderIsUnfulfilled(order: any) {
 }
 
 function orderIsOnHold(order: any) {
-  return String(order?.displayFulfillmentStatus || "").toUpperCase() === "ON_HOLD";
-}
-
-function fulfillmentRecords(order: any) {
-  if (Array.isArray(order?.fulfillments)) {
-    return order.fulfillments;
-  }
-
-  if (Array.isArray(order?.fulfillments?.nodes)) {
-    return order.fulfillments.nodes;
-  }
-
-  return [];
-}
-
-function orderIsReadyForPickup(order: any) {
-  const orderStatus = String(order?.displayFulfillmentStatus || "").toUpperCase();
-
-  if (orderStatus === "READY_FOR_PICKUP") {
-    return true;
-  }
-
-  return fulfillmentRecords(order).some((fulfillment: any) => {
-    const displayStatus = String(fulfillment?.displayStatus || "").toUpperCase();
-    const shipmentStatus = String(fulfillment?.shipmentStatus || "").toUpperCase();
-
-    return (
-      displayStatus === "READY_FOR_PICKUP" ||
-      shipmentStatus === "READY_FOR_PICKUP"
-    );
-  });
+  return normalizeStatus(order?.displayFulfillmentStatus) === "ON_HOLD";
 }
 
 export function orderStatusLabel(order: any) {

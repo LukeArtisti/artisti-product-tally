@@ -161,6 +161,22 @@ export async function fetchShopTimezone(admin: any): Promise<ShopTimezone> {
   };
 }
 
+const ORDER_FULFILLMENT_FIELDS = `
+  displayFulfillmentStatus
+  fulfillments(first: 5) {
+    displayStatus
+  }
+  fulfillmentOrders(first: 3) {
+    nodes {
+      fulfillments(first: 2) {
+        nodes {
+          displayStatus
+        }
+      }
+    }
+  }
+`;
+
 const ORDER_CHANNEL_FIELDS = `
   sourceName
   publication {
@@ -469,10 +485,7 @@ export async function fetchAllOrders(
               closedAt
               cancelledAt
               displayFinancialStatus
-              displayFulfillmentStatus
-              fulfillments(first: 20) {
-                displayStatus
-              }
+              ${ORDER_FULFILLMENT_FIELDS}
               ${ORDER_CHANNEL_FIELDS}
 
               lineItems(first: 250) {
@@ -501,7 +514,7 @@ export async function fetchAllOrders(
         }`,
       {
         variables: {
-          first: 100,
+          first: 25,
           after,
           query: orderQuery,
         },
@@ -560,10 +573,7 @@ export async function fetchOrdersSummary(
               closedAt
               cancelledAt
               displayFinancialStatus
-              displayFulfillmentStatus
-              fulfillments(first: 20) {
-                displayStatus
-              }
+              ${ORDER_FULFILLMENT_FIELDS}
               ${ORDER_CHANNEL_FIELDS}
               currentSubtotalLineItemsQuantity
               subtotalLineItemsQuantity
@@ -577,7 +587,7 @@ export async function fetchOrdersSummary(
         }`,
       {
         variables: {
-          first: 100,
+          first: 50,
           after,
           query: orderQuery,
         },
@@ -743,10 +753,7 @@ const SHIPPING_LABEL_ORDER_FIELDS = `
   closedAt
   cancelledAt
   displayFinancialStatus
-  displayFulfillmentStatus
-  fulfillments(first: 20) {
-    displayStatus
-  }
+  ${ORDER_FULFILLMENT_FIELDS}
   ${ORDER_CHANNEL_FIELDS}
   customAttributes {
     key
@@ -900,7 +907,7 @@ async function fetchShippingLabelOrderPage(
       }`,
     {
       variables: {
-        first: 50,
+        first: 25,
         after,
         query: orderQuery,
       },
