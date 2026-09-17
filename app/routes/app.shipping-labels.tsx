@@ -7,12 +7,14 @@ import {
   parseSalesChannelIds,
 } from "../order-filters";
 import {
+  buildOrderRangeQuery,
   buildTallyOrderQuery,
   fetchSalesChannels,
   fetchShippingLabelOrders,
   fetchShopPrintInfo,
   fetchShopTimezone,
   toShippingLabelOrder,
+  withPickupDeliveryFlags,
 } from "../orders.server";
 
 function parseExcludedOrderIds(value: string | null) {
@@ -72,8 +74,19 @@ export async function loader({ request }: LoaderFunctionArgs) {
       salesChannels,
       selectedChannelIds,
     );
+    const rangeQuery = buildOrderRangeQuery(
+      fromDate,
+      fromTime,
+      toDate,
+      toTime,
+      shop.ianaTimezone,
+    );
     const orders = filterOrdersBySelection(
-      await fetchShippingLabelOrders(admin, orderQuery),
+      await withPickupDeliveryFlags(
+        admin,
+        await fetchShippingLabelOrders(admin, orderQuery),
+        rangeQuery,
+      ),
       statuses,
       salesChannels,
       selectedChannelIds,

@@ -7,11 +7,13 @@ import {
   parseSalesChannelIds,
 } from "../order-filters";
 import {
+  buildOrderRangeQuery,
   buildTallyOrderQuery,
   fetchOrdersSummary,
   fetchSalesChannels,
   fetchShopTimezone,
   toIncludedOrder,
+  withPickupDeliveryFlags,
 } from "../orders.server";
 
 export async function loader({ request }: LoaderFunctionArgs) {
@@ -48,8 +50,19 @@ export async function loader({ request }: LoaderFunctionArgs) {
       salesChannels,
       selectedChannelIds,
     );
+    const rangeQuery = buildOrderRangeQuery(
+      fromDate,
+      fromTime,
+      toDate,
+      toTime,
+      shop.ianaTimezone,
+    );
     const orders = filterOrdersBySelection(
-      await fetchOrdersSummary(admin, orderQuery),
+      await withPickupDeliveryFlags(
+        admin,
+        await fetchOrdersSummary(admin, orderQuery),
+        rangeQuery,
+      ),
       statuses,
       salesChannels,
       selectedChannelIds,

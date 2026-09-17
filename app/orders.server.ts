@@ -163,10 +163,16 @@ export async function fetchShopTimezone(admin: any): Promise<ShopTimezone> {
 
 const ORDER_FULFILLMENT_FIELDS = `
   displayFulfillmentStatus
+  shippingLine {
+    title
+    code
+    source
+  }
   shippingLines(first: 5) {
     nodes {
       title
       code
+      source
     }
   }
 `;
@@ -609,6 +615,80 @@ export async function fetchOrdersSummary(
   }
 
   return orders;
+}
+
+async function fetchPickupOrderIds(admin: any, rangeQuery: string) {
+  const pickupIds = new Set<string>();
+  const searchQueries = [
+    `(${rangeQuery}) AND delivery_method:pick-up`,
+    `(${rangeQuery}) AND delivery_method:pickup`,
+  ];
+
+  for (const query of searchQueries) {
+    let after: string | null = null;
+    let hasNextPage = true;
+    let pages = 0;
+
+    while (hasNextPage && pages < 20) {
+      const response: any = await admin.graphql(
+        `#graphql
+          query PickupOrderIds($first: Int!, $after: String, $query: String!) {
+            orders(first: $first, after: $after, query: $query) {
+              nodes {
+                id
+              }
+              pageInfo {
+                hasNextPage
+                endCursor
+              }
+            }
+          }`,
+        {
+          variables: {
+            first: 50,
+            after,
+            query,
+          },
+        },
+      );
+
+      const data = await response.json();
+
+      if (data.errors || !data.data?.orders) {
+        break;
+      }
+
+      const connection = data.data.orders;
+
+      for (const order of connection.nodes || []) {
+        if (!order?.id) continue;
+        pickupIds.add(order.id);
+        pickupIds.add(gidNumericId(order.id));
+      }
+
+      hasNextPage = Boolean(connection.pageInfo?.hasNextPage);
+      after = connection.pageInfo?.endCursor || null;
+      pages += 1;
+    }
+  }
+
+  return pickupIds;
+}
+
+export async function withPickupDeliveryFlags<T>(
+  admin: any,
+  orders: T[],
+  rangeQuery: string,
+) {
+  const pickupIds = await fetchPickupOrderIds(admin, rangeQuery).catch(
+    () => new Set<string>(),
+  );
+
+  return (orders as any[]).map((order) => ({
+    ...order,
+    isPickup:
+      pickupIds.has(order.id) || pickupIds.has(gidNumericId(order.id)),
+  })) as T[];
 }
 
 export function toIncludedOrder(order: any): IncludedOrder {

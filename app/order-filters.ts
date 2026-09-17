@@ -152,7 +152,10 @@ function normalizeStatus(value: unknown) {
 }
 
 function deliveryTokens(order: any) {
-  const lines = asNodes(order?.shippingLines);
+  const lines = [
+    order?.shippingLine,
+    ...asNodes(order?.shippingLines),
+  ].filter(Boolean);
 
   return [
     order?.shippingMethod,
@@ -160,6 +163,7 @@ function deliveryTokens(order: any) {
     ...lines.map((line) => line?.title),
     ...lines.map((line) => line?.code),
     ...lines.map((line) => line?.source),
+    ...lines.map((line) => line?.shippingRateHandle),
   ]
     .map((value) =>
       String(value || "")
@@ -170,11 +174,16 @@ function deliveryTokens(order: any) {
 }
 
 function orderIsPickup(order: any) {
+  if (order?.isPickup === true) {
+    return true;
+  }
+
   return deliveryTokens(order).some(
     (token) =>
       token.includes("pickupinstore") ||
       token.includes("localpickup") ||
-      token.includes("pickup"),
+      token.includes("pickup") ||
+      token.includes("pickuppoint"),
   );
 }
 
