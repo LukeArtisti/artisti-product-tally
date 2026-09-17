@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import type {
   ActionFunctionArgs,
@@ -91,6 +91,40 @@ type FilterOption = {
   label: string;
 };
 
+function isEventInside(event: Event, ...elements: Array<EventTarget | null | undefined>) {
+  const path = event.composedPath();
+  return elements.some((element) => !!element && path.includes(element));
+}
+
+function getFixedMenuStyle(
+  trigger: HTMLElement | null,
+  width: number,
+  estimatedHeight: number,
+): CSSProperties {
+  if (!trigger) {
+    return { position: "fixed", zIndex: 100000 };
+  }
+
+  const rect = trigger.getBoundingClientRect();
+  const padding = 8;
+  const spaceBelow = window.innerHeight - rect.bottom - padding;
+  const spaceAbove = rect.top - padding;
+  const openUp = spaceBelow < estimatedHeight && spaceAbove > spaceBelow;
+  const left = Math.min(
+    Math.max(padding, rect.left),
+    Math.max(padding, window.innerWidth - width - padding),
+  );
+
+  return {
+    position: "fixed",
+    left,
+    width,
+    top: openUp ? undefined : rect.bottom + 4,
+    bottom: openUp ? window.innerHeight - rect.top + 4 : undefined,
+    zIndex: 100000,
+  };
+}
+
 function MultiSelectFilter({
   label,
   options,
@@ -119,7 +153,7 @@ function MultiSelectFilter({
         .map((option) => option.label)
         .join(", ");
 
-  useLayoutEffect(() => {
+  useEffect(() => {
     if (!isOpen) return;
 
     const updateMenuPosition = () => {
@@ -159,11 +193,7 @@ function MultiSelectFilter({
     if (!isOpen) return;
 
     const handlePointerDown = (event: MouseEvent) => {
-      const target = event.target as Node;
-      if (
-        rootRef.current?.contains(target) ||
-        menuRef.current?.contains(target)
-      ) {
+      if (isEventInside(event, rootRef.current, menuRef.current)) {
         return;
       }
 
@@ -276,11 +306,12 @@ function DatePickerField({
   onChange: (next: string) => void;
 }) {
   const [isOpen, setIsOpen] = useState(false);
+  const [menuStyle, setMenuStyle] = useState<CSSProperties>({});
   const [view, setView] = useState(() => {
     const [year, month] = value.split("-").map(Number);
     return { year: year || new Date().getFullYear(), month: month || 1 };
   });
-  const [menuStyle, setMenuStyle] = useState<CSSProperties>({});
+  const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const selected = value.split("-").map(Number);
@@ -294,32 +325,20 @@ function DatePickerField({
     { month: "long", year: "numeric", timeZone: "UTC" },
   );
 
-  useLayoutEffect(() => {
+  useEffect(() => {
     if (!isOpen) return;
 
     const [year, month] = value.split("-").map(Number);
     if (year && month) {
       setView({ year, month });
     }
+  }, [isOpen]); // eslint-disable-line react-hooks/exhaustive-deps -- sync calendar to value only when opened
+
+  useEffect(() => {
+    if (!isOpen) return;
 
     const updateMenuPosition = () => {
-      const trigger = triggerRef.current;
-      if (!trigger) return;
-
-      const rect = trigger.getBoundingClientRect();
-      const padding = 8;
-      const spaceBelow = window.innerHeight - rect.bottom - padding;
-      const spaceAbove = rect.top - padding;
-      const openUp = spaceBelow < 280 && spaceAbove > spaceBelow;
-
-      setMenuStyle({
-        position: "fixed",
-        left: Math.min(rect.left, window.innerWidth - 280),
-        width: 268,
-        top: openUp ? undefined : rect.bottom + 4,
-        bottom: openUp ? window.innerHeight - rect.top + 4 : undefined,
-        zIndex: 10000,
-      });
+      setMenuStyle(getFixedMenuStyle(triggerRef.current, 268, 320));
     };
 
     updateMenuPosition();
@@ -330,26 +349,19 @@ function DatePickerField({
       window.removeEventListener("resize", updateMenuPosition);
       window.removeEventListener("scroll", updateMenuPosition, true);
     };
-  }, [isOpen, value]);
+  }, [isOpen]);
 
   useEffect(() => {
     if (!isOpen) return;
 
-    const handlePointerDown = (event: MouseEvent) => {
-      const target = event.target as Node;
-      if (
-        triggerRef.current?.contains(target) ||
-        menuRef.current?.contains(target)
-      ) {
-        return;
-      }
-
+    const handlePointerDown = (event: PointerEvent) => {
+      if (isEventInside(event, rootRef.current, menuRef.current)) return;
       setIsOpen(false);
     };
 
-    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("pointerdown", handlePointerDown, true);
 
-    return () => document.removeEventListener("mousedown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown, true);
   }, [isOpen]);
 
   const shiftMonth = (delta: number) => {
@@ -359,10 +371,20 @@ function DatePickerField({
     });
   };
 
+  const selectDay = (day: number) => {
+    onChange(`${view.year}-${pad2(view.month)}-${pad2(day)}`);
+    setIsOpen(false);
+  };
+
   const menu =
     isOpen && typeof document !== "undefined"
       ? createPortal(
-          <div className="calendar-menu" ref={menuRef} style={menuStyle}>
+          <div
+            className="calendar-menu"
+            ref={menuRef}
+            style={menuStyle}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
             <div className="calendar-header">
               <button type="button" onClick={() => shiftMonth(-1)} aria-label="Previous month">
                 ‹
@@ -393,9 +415,10 @@ function DatePickerField({
                     key={day}
                     type="button"
                     className={isSelected ? "is-selected" : ""}
-                    onClick={() => {
-                      onChange(`${view.year}-${pad2(view.month)}-${pad2(day)}`);
-                      setIsOpen(false);
+                    onPointerDown={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      selectDay(day);
                     }}
                   >
                     {day}
@@ -409,12 +432,15 @@ function DatePickerField({
       : null;
 
   return (
-    <div>
+    <div className={`datetime-field${isOpen ? " is-open" : ""}`} ref={rootRef}>
       <button
         type="button"
         className="datetime-trigger"
         ref={triggerRef}
-        onClick={() => setIsOpen((open) => !open)}
+        onClick={() => {
+          setMenuStyle(getFixedMenuStyle(triggerRef.current, 268, 320));
+          setIsOpen((open) => !open);
+        }}
         aria-expanded={isOpen}
       >
         <span>{value}</span>
@@ -441,33 +467,18 @@ function TimePickerField({
 }) {
   const [isOpen, setIsOpen] = useState(false);
   const [menuStyle, setMenuStyle] = useState<CSSProperties>({});
+  const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const hoursRef = useRef<HTMLDivElement>(null);
   const minutesRef = useRef<HTMLDivElement>(null);
   const { hour12, minutes, period } = parseTime12h(value);
 
-  useLayoutEffect(() => {
+  useEffect(() => {
     if (!isOpen) return;
 
     const updateMenuPosition = () => {
-      const trigger = triggerRef.current;
-      if (!trigger) return;
-
-      const rect = trigger.getBoundingClientRect();
-      const padding = 8;
-      const spaceBelow = window.innerHeight - rect.bottom - padding;
-      const spaceAbove = rect.top - padding;
-      const openUp = spaceBelow < 220 && spaceAbove > spaceBelow;
-
-      setMenuStyle({
-        position: "fixed",
-        left: rect.left,
-        width: Math.max(rect.width, 210),
-        top: openUp ? undefined : rect.bottom + 4,
-        bottom: openUp ? window.innerHeight - rect.top + 4 : undefined,
-        zIndex: 10000,
-      });
+      setMenuStyle(getFixedMenuStyle(triggerRef.current, 210, 220));
     };
 
     updateMenuPosition();
@@ -480,39 +491,50 @@ function TimePickerField({
     };
   }, [isOpen]);
 
-  useLayoutEffect(() => {
+  useEffect(() => {
     if (!isOpen) return;
 
-    const selectedHour = hoursRef.current?.querySelector(".is-selected");
-    const selectedMinute = minutesRef.current?.querySelector(".is-selected");
-    selectedHour?.scrollIntoView({ block: "center" });
-    selectedMinute?.scrollIntoView({ block: "center" });
-  }, [isOpen, hour12, minutes]);
+    const handlePointerDown = (event: PointerEvent) => {
+      if (isEventInside(event, rootRef.current, menuRef.current)) return;
+      setIsOpen(false);
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown, true);
+
+    return () => document.removeEventListener("pointerdown", handlePointerDown, true);
+  }, [isOpen]);
 
   useEffect(() => {
     if (!isOpen) return;
 
-    const handlePointerDown = (event: MouseEvent) => {
-      const target = event.target as Node;
-      if (
-        triggerRef.current?.contains(target) ||
-        menuRef.current?.contains(target)
-      ) {
-        return;
-      }
+    const hourButton = hoursRef.current?.querySelector<HTMLButtonElement>(".is-selected");
+    const minuteButton = minutesRef.current?.querySelector<HTMLButtonElement>(".is-selected");
+    if (hourButton && hoursRef.current) {
+      hoursRef.current.scrollTop =
+        hourButton.offsetTop - hoursRef.current.clientHeight / 2 + hourButton.clientHeight / 2;
+    }
+    if (minuteButton && minutesRef.current) {
+      minutesRef.current.scrollTop =
+        minuteButton.offsetTop -
+        minutesRef.current.clientHeight / 2 +
+        minuteButton.clientHeight / 2;
+    }
+  }, [isOpen, hour12, minutes]);
 
-      setIsOpen(false);
-    };
-
-    document.addEventListener("mousedown", handlePointerDown);
-
-    return () => document.removeEventListener("mousedown", handlePointerDown);
-  }, [isOpen]);
+  const choose = (nextHour: number, nextMinutes: string, nextPeriod: "AM" | "PM", close = false) => {
+    onChange(toTime24(nextHour, nextMinutes, nextPeriod));
+    if (close) setIsOpen(false);
+  };
 
   const menu =
     isOpen && typeof document !== "undefined"
       ? createPortal(
-          <div className="time-menu" ref={menuRef} style={menuStyle}>
+          <div
+            className="time-menu"
+            ref={menuRef}
+            style={menuStyle}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
             <div className="time-column" ref={hoursRef}>
               {Array.from({ length: 12 }, (_, index) => {
                 const nextHour = index + 1;
@@ -521,7 +543,11 @@ function TimePickerField({
                     key={nextHour}
                     type="button"
                     className={nextHour === hour12 ? "is-selected" : ""}
-                    onClick={() => onChange(toTime24(nextHour, minutes, period))}
+                    onPointerDown={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      choose(nextHour, minutes, period);
+                    }}
                   >
                     {nextHour}
                   </button>
@@ -536,7 +562,11 @@ function TimePickerField({
                     key={next}
                     type="button"
                     className={next === minutes ? "is-selected" : ""}
-                    onClick={() => onChange(toTime24(hour12, next, period))}
+                    onPointerDown={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      choose(hour12, next, period);
+                    }}
                   >
                     {next}
                   </button>
@@ -549,9 +579,10 @@ function TimePickerField({
                   key={nextPeriod}
                   type="button"
                   className={nextPeriod === period ? "is-selected" : ""}
-                  onClick={() => {
-                    onChange(toTime24(hour12, minutes, nextPeriod));
-                    setIsOpen(false);
+                  onPointerDown={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    choose(hour12, minutes, nextPeriod, true);
                   }}
                 >
                   {nextPeriod}
@@ -564,12 +595,15 @@ function TimePickerField({
       : null;
 
   return (
-    <div>
+    <div className={`datetime-field${isOpen ? " is-open" : ""}`} ref={rootRef}>
       <button
         type="button"
         className="datetime-trigger"
         ref={triggerRef}
-        onClick={() => setIsOpen((open) => !open)}
+        onClick={() => {
+          setMenuStyle(getFixedMenuStyle(triggerRef.current, 210, 220));
+          setIsOpen((open) => !open);
+        }}
         aria-expanded={isOpen}
       >
         <span>{formatTime12h(value)}</span>
@@ -765,12 +799,13 @@ function buildShippingLabelPrintHtml(
   <head>
     <meta charset="utf-8" />
     <title>Shipping labels</title>
+    <link rel="stylesheet" href="https://cdn.shopify.com/static/fonts/inter/v4/styles.css" />
     <style>
       * { box-sizing: border-box; }
       body {
         margin: 0;
         color: #111;
-        font-family: Helvetica, Arial, sans-serif;
+        font-family: Inter, Helvetica, Arial, sans-serif;
         font-size: 14px;
         line-height: 1.4;
       }
@@ -1224,15 +1259,16 @@ export default function Index() {
 
     downloadCsv(
       `bean-packing-team-${rangeLabel}.csv`,
-      ["SKU", "Product Name", "Variant", "Quantity"],
+      ["SKU", "Product Name", "Variant", "Sales Channel", "Quantity"],
       [
         ...coffeeProducts.map((item) => [
           item.sku || "",
           item.name,
           item.variant || "",
+          item.salesChannel || "",
           item.quantity,
         ]),
-        ["", "", "Total Coffee Items", totalCoffeeItems],
+        ["", "", "", "Total Coffee Items", totalCoffeeItems],
       ],
     );
   };
@@ -1242,14 +1278,15 @@ export default function Index() {
 
     downloadCsv(
       `bar-staff-${rangeLabel}.csv`,
-      ["SKU", "Item Name", "Quantity"],
+      ["SKU", "Item Name", "Sales Channel", "Quantity"],
       [
         ...accessories.map((item) => [
           item.sku || "",
           item.variant ? `${item.name} – ${item.variant}` : item.name,
+          item.salesChannel || "",
           item.quantity,
         ]),
-        ["", "Total Accessory Items", totalAccessoryItems],
+        ["", "", "Total Accessory Items", totalAccessoryItems],
       ],
     );
   };
@@ -1308,8 +1345,7 @@ export default function Index() {
                   <div className="date-tally-row">
 
                     <div className="date-tally-box">
-                      <s-stack gap="small">
-
+                      <div className="date-tally-fields">
                         <s-text>
                           <strong>From</strong>
                         </s-text>
@@ -1323,13 +1359,11 @@ export default function Index() {
                           value={fromTime}
                           onChange={setFromTime}
                         />
-
-                      </s-stack>
+                      </div>
                     </div>
 
                     <div className="date-tally-box">
-                      <s-stack gap="small">
-
+                      <div className="date-tally-fields">
                         <s-text>
                           <strong>To</strong>
                         </s-text>
@@ -1343,8 +1377,7 @@ export default function Index() {
                           value={toTime}
                           onChange={setToTime}
                         />
-
-                      </s-stack>
+                      </div>
                     </div>
 
                     <div className="or-column">
@@ -1565,6 +1598,7 @@ export default function Index() {
                               <th>SKU</th>
                               <th>Product Name</th>
                               <th>Variant</th>
+                              <th>Sales Channel</th>
                               <th>Quantity</th>
                             </tr>
                           </thead>
@@ -1572,13 +1606,13 @@ export default function Index() {
                           <tbody>
                             {isGenerating ? (
                               <tr>
-                                <td colSpan={4} className="preview-empty">
+                                <td colSpan={5} className="preview-empty">
                                   Loading coffee products from orders...
                                 </td>
                               </tr>
                             ) : coffeeProducts.length === 0 ? (
                               <tr>
-                                <td colSpan={4} className="preview-empty">
+                                <td colSpan={5} className="preview-empty">
                                   {fetcher.data?.success
                                     ? "No coffee products in this order range."
                                     : "Generate a product tally to preview coffee items."}
@@ -1587,11 +1621,12 @@ export default function Index() {
                             ) : (
                               coffeeProducts.map((item) => (
                                 <tr
-                                  key={`${item.sku}-${item.name}-${item.variant}`}
+                                  key={`${item.sku}-${item.name}-${item.variant}-${item.salesChannel}`}
                                 >
                                   <td>{item.sku || "—"}</td>
                                   <td>{item.name}</td>
                                   <td>{item.variant}</td>
+                                  <td>{item.salesChannel}</td>
                                   <td>{item.quantity}</td>
                                 </tr>
                               ))
@@ -1638,6 +1673,7 @@ export default function Index() {
                             <tr>
                               <th>SKU</th>
                               <th>Item Name</th>
+                              <th>Sales Channel</th>
                               <th>Quantity</th>
                             </tr>
                           </thead>
@@ -1646,13 +1682,13 @@ export default function Index() {
 
                             {isGenerating ? (
                               <tr>
-                                <td colSpan={3} className="preview-empty">
+                                <td colSpan={4} className="preview-empty">
                                   Loading accessories from orders...
                                 </td>
                               </tr>
                             ) : accessories.length === 0 ? (
                               <tr>
-                                <td colSpan={3} className="preview-empty">
+                                <td colSpan={4} className="preview-empty">
                                   {fetcher.data?.success
                                     ? "No accessories in this order range."
                                     : "Generate a product tally to preview accessories."}
@@ -1661,13 +1697,14 @@ export default function Index() {
                             ) : (
                               accessories.map((item) => (
                                 <tr
-                                  key={`${item.sku}-${item.name}-${item.variant}`}
+                                  key={`${item.sku}-${item.name}-${item.variant}-${item.salesChannel}`}
                                 >
                                   <td>{item.sku || "—"}</td>
                                   <td>
                                     {item.name}
                                     {item.variant ? ` – ${item.variant}` : ""}
                                   </td>
+                                  <td>{item.salesChannel}</td>
                                   <td>{item.quantity}</td>
                                 </tr>
                               ))
@@ -1895,6 +1932,18 @@ export default function Index() {
                   <div className="summary-row">
 
                     <span>
+                      Total Orders
+                    </span>
+
+                    <strong>
+                      {fetcher.data?.orderCount ?? 0}
+                    </strong>
+
+                  </div>
+
+                  <div className="summary-row">
+
+                    <span>
                       Total Coffee Items
                     </span>
 
@@ -1966,7 +2015,12 @@ export default function Index() {
             onClick={(event) => event.stopPropagation()}
           >
             <div className="included-orders-popup-header">
-              <strong>Included orders</strong>
+              <strong>
+                Included orders
+                {!isLoadingOrders
+                  ? ` (${includedOrders.length} Orders)`
+                  : ""}
+              </strong>
               <button
                 type="button"
                 className="included-orders-close"
@@ -1976,15 +2030,18 @@ export default function Index() {
               </button>
             </div>
 
-            <p className="included-orders-popup-range">
-              Orders created from {fromDate} {formatTime12h(fromTime)} to {toDate}{" "}
-              {formatTime12h(toTime)}{" "}
-              ({timezoneLabel})
-              {!isLoadingOrders && includedOrders.length > 0
-                ? ` · ${selectedOrderCount} of ${includedOrders.length} selected`
-                : ""}
-              . Uncheck an order to exclude it from the product tally.
-            </p>
+            <div className="included-orders-popup-range">
+              <p>
+                Orders created from {fromDate} {formatTime12h(fromTime)} to {toDate}{" "}
+                {formatTime12h(toTime)} ({timezoneLabel})
+              </p>
+              {!isLoadingOrders && includedOrders.length > 0 && (
+                <p>
+                  {selectedOrderCount} of {includedOrders.length} selected.
+                </p>
+              )}
+              <p>Uncheck an order to exclude it from the product tally.</p>
+            </div>
 
             {isLoadingOrders && (
               <p>Loading orders in this date and time range...</p>
@@ -2023,6 +2080,7 @@ export default function Index() {
                       </th>
                       <th>Order</th>
                       <th>Order date</th>
+                      <th>Sales channel</th>
                       <th>Items</th>
                     </tr>
                   </thead>
@@ -2045,6 +2103,7 @@ export default function Index() {
                           </td>
                           <td>{order.name}</td>
                           <td>{formatOrderDateTime(order.processedAt)}</td>
+                          <td>{order.salesChannel}</td>
                           <td>{order.itemCount}</td>
                         </tr>
                       );
@@ -2145,6 +2204,12 @@ export default function Index() {
 
         * {
           box-sizing: border-box;
+          font-family: Inter, -apple-system, BlinkMacSystemFont, "San Francisco", "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+        }
+
+        :root {
+          --p-font-family-sans: Inter, -apple-system, BlinkMacSystemFont, "San Francisco", "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+          --p-font-sans: Inter, -apple-system, BlinkMacSystemFont, "San Francisco", "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
         }
 
 
@@ -2289,17 +2354,35 @@ export default function Index() {
 
           gap: 12px;
           width: 100%;
-          align-items: stretch;
+          align-items: start;
+          overflow: visible;
         }
 
         .date-tally-box,
         .quick-select-box {
-          height: 180px;
+          min-height: 180px;
+          height: auto;
+          overflow: visible;
           border: 1px solid #d9d9d9;
           border-radius: 8px;
           padding: 14px;
           min-width: 0;
           background: white;
+        }
+
+        .date-tally-fields {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        }
+
+        .datetime-field {
+          position: relative;
+          z-index: 1;
+        }
+
+        .datetime-field.is-open {
+          z-index: 30;
         }
 
         .date-tally-box input,
@@ -2401,6 +2484,7 @@ export default function Index() {
         .time-menu {
           display: grid;
           grid-template-columns: 1fr 1fr 0.8fr;
+          width: 210px;
           height: 220px;
           overflow: hidden;
         }
@@ -2642,7 +2726,7 @@ export default function Index() {
         }
 
         .included-orders-popup {
-          width: min(640px, 100%);
+          width: min(760px, 100%);
           max-height: 100%;
           display: flex;
           flex-direction: column;
@@ -2674,6 +2758,10 @@ export default function Index() {
           line-height: 1.5;
           margin: 0 0 12px;
           flex-shrink: 0;
+        }
+
+        .included-orders-popup-range p {
+          margin: 0;
         }
 
         .included-orders-close {
@@ -2800,7 +2888,7 @@ export default function Index() {
           border-radius: 8px;
           overflow: hidden;
           color: #111;
-          font-family: Helvetica, Arial, sans-serif;
+          font-family: Inter, Helvetica, Arial, sans-serif;
           font-size: 14px;
           line-height: 1.4;
         }

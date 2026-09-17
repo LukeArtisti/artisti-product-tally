@@ -1,7 +1,10 @@
+import { orderSalesChannelLabel } from "./order-filters";
+
 export type TallyItem = {
   sku: string;
   name: string;
   variant?: string;
+  salesChannel: string;
   quantity: number;
 };
 
@@ -27,6 +30,7 @@ type GroupedCount = {
   sku: string;
   name: string;
   variants: string[];
+  salesChannel: string;
 };
 
 const GROUP_ORDER = [
@@ -122,8 +126,10 @@ function addToGroup(
   quantity: number,
   sku: string,
   variantTitle: string,
+  salesChannel: string,
 ) {
-  const existing = groupedTally[groupKey][displayTitle];
+  const groupItemKey = `${displayTitle}\u0001${salesChannel}`;
+  const existing = groupedTally[groupKey][groupItemKey];
   const variant = variantLabel(variantTitle);
 
   if (existing) {
@@ -134,11 +140,12 @@ function addToGroup(
     return;
   }
 
-  groupedTally[groupKey][displayTitle] = {
+  groupedTally[groupKey][groupItemKey] = {
     count: quantity,
     sku,
     name,
     variants: variant ? [variant] : [],
+    salesChannel,
   };
 }
 
@@ -147,11 +154,13 @@ function toTallyItem(row: {
   name: string;
   count: number;
   variants: string[];
+  salesChannel: string;
 }): TallyItem {
   return {
     sku: row.sku,
     name: row.name,
     variant: row.variants.join(", "),
+    salesChannel: row.salesChannel,
     quantity: row.count,
   };
 }
@@ -169,6 +178,7 @@ export function tallyOrders(orders: OrderNode[]): {
   for (const order of orders) {
     const lineItems = order.lineItems?.nodes;
     if (!lineItems) continue;
+    const salesChannel = orderSalesChannelLabel(order);
 
     for (const item of lineItems) {
       if (!item) continue;
@@ -242,14 +252,15 @@ export function tallyOrders(orders: OrderNode[]): {
           quantity,
           sku,
           variantTitle,
+          salesChannel,
         );
       }
     }
   }
 
   const coffeeProducts = Object.entries(groupedTally.Coffees)
-    .map(([title, data]) => ({
-      title,
+    .map(([key, data]) => ({
+      title: key.split("\u0001")[0],
       ...data,
     }))
     .sort(customCoffeeSort)
@@ -258,8 +269,8 @@ export function tallyOrders(orders: OrderNode[]): {
   const accessories = GROUP_ORDER.filter((group) => group !== "Coffees")
     .flatMap((groupName) => {
       const products = Object.entries(groupedTally[groupName]).map(
-        ([title, data]) => ({
-          title,
+        ([key, data]) => ({
+          title: key.split("\u0001")[0],
           ...data,
         }),
       );

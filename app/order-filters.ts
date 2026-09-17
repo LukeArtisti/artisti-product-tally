@@ -196,6 +196,42 @@ const SOURCE_NAME_ALIASES: Record<string, string[]> = {
   recharge: ["recharge subscriptions", "subscriptions"],
 };
 
+function titleCaseChannel(value: string) {
+  return value
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+export function orderSalesChannelLabel(order: any) {
+  const channelInfo = order?.channelInformation;
+  const definition = channelInfo?.channelDefinition;
+  const labels = [
+    channelInfo?.displayName,
+    definition?.channelName,
+    order?.publication?.name,
+    channelInfo?.app?.title,
+    order?.app?.name,
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+
+  if (labels[0]) {
+    return labels[0];
+  }
+
+  const sourceName = String(order?.sourceName || "").trim();
+
+  if (!sourceName) {
+    return "Unknown";
+  }
+
+  const aliasName = SOURCE_NAME_ALIASES[sourceName.toLowerCase()]?.[0];
+
+  return titleCaseChannel(aliasName || sourceName);
+}
+
 function orderChannelValues(order: any) {
   const sourceName = String(order?.sourceName || "").toLowerCase();
   const aliasNames = SOURCE_NAME_ALIASES[sourceName] || [];

@@ -1,6 +1,7 @@
 import {
   buildOrderStatusQuery,
   EXTRA_SALES_CHANNELS,
+  orderSalesChannelLabel,
   type OrderStatusValue,
   type SalesChannelOption,
 } from "./order-filters";
@@ -602,6 +603,7 @@ export function toIncludedOrder(order: any): IncludedOrder {
     id: order.id,
     name: order.name,
     processedAt: order.processedAt || order.createdAt,
+    salesChannel: orderSalesChannelLabel(order),
     itemCount:
       order.subtotalLineItemsQuantity ||
       order.currentSubtotalLineItemsQuantity ||
