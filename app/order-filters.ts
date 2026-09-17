@@ -207,10 +207,10 @@ function titleCaseChannel(value: string) {
 export function orderSalesChannelLabel(order: any) {
   const channelInfo = order?.channelInformation;
   const definition = channelInfo?.channelDefinition;
+  const sourceName = String(order?.sourceName || "").trim();
   const labels = [
     channelInfo?.displayName,
     definition?.channelName,
-    order?.publication?.name,
     channelInfo?.app?.title,
     order?.app?.name,
   ]
@@ -221,69 +221,81 @@ export function orderSalesChannelLabel(order: any) {
     return labels[0];
   }
 
-  const sourceName = String(order?.sourceName || "").trim();
+  const aliasName = SOURCE_NAME_ALIASES[sourceName.toLowerCase()]?.[0];
+
+  if (aliasName) {
+    return titleCaseChannel(aliasName);
+  }
+
+  const publicationName = String(order?.publication?.name || "").trim();
+
+  if (publicationName) {
+    return publicationName;
+  }
 
   if (!sourceName) {
     return "Unknown";
   }
 
-  const aliasName = SOURCE_NAME_ALIASES[sourceName.toLowerCase()]?.[0];
-
-  return titleCaseChannel(aliasName || sourceName);
+  return titleCaseChannel(sourceName);
 }
 
-function orderChannelValues(order: any) {
-  const sourceName = String(order?.sourceName || "").toLowerCase();
-  const aliasNames = SOURCE_NAME_ALIASES[sourceName] || [];
+function orderChannelIdentity(order: any) {
   const channelInfo = order?.channelInformation;
+  const definition = channelInfo?.channelDefinition;
 
-  return [
-    gidNumericId(order?.publication?.id),
-    order?.publication?.name,
-    order?.sourceName,
-    ...aliasNames,
-    order?.app?.id,
-    gidNumericId(order?.app?.id),
-    order?.app?.name,
-    order?.attribution?.handle,
-    order?.attribution?.displayName,
-    channelInfo?.channelId,
-    gidNumericId(channelInfo?.channelId),
-    channelInfo?.displayName,
-    channelInfo?.app?.id,
-    gidNumericId(channelInfo?.app?.id),
-    channelInfo?.app?.title,
-    channelInfo?.channelDefinition?.id,
-    gidNumericId(channelInfo?.channelDefinition?.id),
-    channelInfo?.channelDefinition?.handle,
-    channelInfo?.channelDefinition?.channelName,
-    channelInfo?.channelDefinition?.subChannelName,
-  ]
-    .filter(Boolean)
-    .map((value) => String(value).toLowerCase());
+  return {
+    label: normalizeChannelToken(orderSalesChannelLabel(order)),
+    handle: normalizeChannelToken(String(definition?.handle || "")),
+    definitionName: normalizeChannelToken(
+      String(definition?.channelName || definition?.subChannelName || ""),
+    ),
+    sourceName: String(order?.sourceName || "").toLowerCase(),
+    appTitle: normalizeChannelToken(
+      String(channelInfo?.app?.title || order?.app?.name || ""),
+    ),
+  };
+}
+
+function isRechargeOrder(order: any) {
+  const identity = orderChannelIdentity(order);
+
+  return (
+    identity.sourceName === "subscription_contract" ||
+    identity.sourceName === "recharge" ||
+    identity.label.includes("recharge") ||
+    identity.appTitle.includes("recharge") ||
+    identity.handle.includes("recharge")
+  );
+}
+
+function isBeanzOrder(order: any) {
+  const identity = orderChannelIdentity(order);
+
+  return (
+    identity.label.includes("beanz") ||
+    identity.appTitle.includes("beanz") ||
+    identity.handle.includes("beanz") ||
+    identity.sourceName.includes("beanz")
+  );
 }
 
 function orderMatchesOneChannel(order: any, channel: SalesChannelOption) {
-  const values = orderChannelValues(order);
-  const candidates = [channel.id, channel.name, channel.handle]
-    .filter(Boolean)
-    .map((value) => String(value).toLowerCase());
-  const normalizedCandidates = candidates.map(normalizeChannelToken);
-  const normalizedValues = values.map(normalizeChannelToken);
-
-  if (candidates.some((candidate) => values.includes(candidate))) {
-    return true;
+  if (channel.id === "recharge-subscriptions") {
+    return isRechargeOrder(order);
   }
 
-  return normalizedCandidates.some(
-    (candidate) =>
-      candidate.length > 0 &&
-      normalizedValues.some(
-        (value) =>
-          value === candidate ||
-          value.includes(candidate) ||
-          candidate.includes(value),
-      ),
+  if (channel.id === "beanz-connect-integration") {
+    return isBeanzOrder(order);
+  }
+
+  const identity = orderChannelIdentity(order);
+  const name = normalizeChannelToken(channel.name);
+  const handle = normalizeChannelToken(channel.handle);
+
+  return Boolean(
+    identity.label &&
+      (identity.label === name || (handle.length > 0 && identity.label === handle)),
   );
 }
 
@@ -296,10 +308,12 @@ function orderMatchesChannels(
     return true;
   }
 
-  const selected = channels.filter((channel) => selectedIds.includes(channel.id));
+  const selected = channels.filter((channel) =>
+    selectedIds.includes(channel.id),
+  );
 
   if (selected.length === 0) {
-    return true;
+    return false;
   }
 
   return selected.some((channel) => orderMatchesOneChannel(order, channel));

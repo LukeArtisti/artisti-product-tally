@@ -31,6 +31,12 @@ import type {
   ShopTimezone,
 } from "../shipping-label";
 import { tallyOrders, type TallyItem } from "../tally.server";
+import {
+  defaultSaveName,
+  parseExcludedOrderIds,
+  type TallySaveParams,
+} from "../tally-saves";
+import { getSavedTally } from "../tally-saves.server";
 
 type TallyResponse = {
   success?: boolean;
@@ -893,30 +899,22 @@ function buildShippingLabelPrintHtml(
 </html>`;
 }
 
-function parseExcludedOrderIds(value: FormDataEntryValue | null) {
-  try {
-    const parsed = JSON.parse(String(value || "[]"));
-
-    if (!Array.isArray(parsed)) {
-      return new Set<string>();
-    }
-
-    return new Set(
-      parsed.filter((id): id is string => typeof id === "string" && id.length > 0),
-    );
-  } catch {
-    return new Set<string>();
-  }
-}
-
 export async function loader({ request }: LoaderFunctionArgs) {
-  const { admin } = await authenticate.admin(request);
-  const [shop, salesChannels] = await Promise.all([
+  const { admin, session } = await authenticate.admin(request);
+  const url = new URL(request.url);
+  const savedId = url.searchParams.get("savedId");
+  const [shop, salesChannels, loadedSaved] = await Promise.all([
     fetchShopTimezone(admin),
     fetchSalesChannels(admin),
+    savedId ? getSavedTally(session.shop, savedId) : Promise.resolve(null),
   ]);
 
-  return { ...shop, salesChannels };
+  return {
+    ...shop,
+    salesChannels,
+    loadedSaved,
+    loadedSavedError: savedId && !loadedSaved ? "Saved tally not found." : null,
+  };
 }
 
 export async function action({ request }: ActionFunctionArgs) {
@@ -1013,25 +1011,38 @@ export default function Index() {
   const fetcher = useFetcher<TallyResponse>();
   const ordersFetcher = useFetcher<OrdersListResponse>();
   const labelsFetcher = useFetcher<ShippingLabelsResponse>();
+  const saveFetcher = useFetcher<{
+    success?: boolean;
+    error?: string;
+    savedId?: string;
+    name?: string;
+  }>();
   const salesChannels = shop.salesChannels ?? [];
+  const loadedSaved = shop.loadedSaved;
 
   const ianaTimezone = shop.ianaTimezone || "UTC";
   const timezoneLabel = formatTimezoneLabel(shop);
   const storeToday = formatYmdInTimeZone(new Date(), ianaTimezone);
 
-  const [fromDate, setFromDate] = useState(storeToday);
-  const [fromTime, setFromTime] = useState("00:00");
-  const [toDate, setToDate] = useState(storeToday);
-  const [toTime, setToTime] = useState("23:59");
+  const [fromDate, setFromDate] = useState(loadedSaved?.fromDate ?? storeToday);
+  const [fromTime, setFromTime] = useState(loadedSaved?.fromTime ?? "00:00");
+  const [toDate, setToDate] = useState(loadedSaved?.toDate ?? storeToday);
+  const [toTime, setToTime] = useState(loadedSaved?.toTime ?? "23:59");
   const [isOrdersModalOpen, setIsOrdersModalOpen] = useState(false);
   const [isPrintModalOpen, setIsPrintModalOpen] = useState(false);
+  const [isSaveModalOpen, setIsSaveModalOpen] = useState(false);
+  const [saveName, setSaveName] = useState("");
   const [excludedOrderIds, setExcludedOrderIds] = useState<Set<string>>(
-    () => new Set(),
+    () => new Set(loadedSaved?.excludedOrderIds ?? []),
   );
-  const [orderStatuses, setOrderStatuses] = useState<OrderStatusValue[]>([
-    "open",
-  ]);
-  const [salesChannelIds, setSalesChannelIds] = useState<string[]>(["all"]);
+  const [orderStatuses, setOrderStatuses] = useState<OrderStatusValue[]>(
+    loadedSaved?.orderStatuses ?? ["open"],
+  );
+  const [salesChannelIds, setSalesChannelIds] = useState<string[]>(
+    loadedSaved?.salesChannelIds ?? ["all"],
+  );
+  const skipExcludeResetRef = useRef(Boolean(loadedSaved));
+  const appliedSavedIdRef = useRef<string | null>(null);
 
   const coffeeProducts = fetcher.data?.coffeeProducts ?? [];
   const accessories = fetcher.data?.accessories ?? [];
@@ -1118,6 +1129,11 @@ export default function Index() {
   };
 
   useEffect(() => {
+    if (skipExcludeResetRef.current) {
+      skipExcludeResetRef.current = false;
+      return;
+    }
+
     setExcludedOrderIds(new Set());
   }, [fromDate, fromTime, toDate, toTime, orderStatuses, salesChannelIds]);
 
@@ -1135,19 +1151,92 @@ export default function Index() {
     );
   });
 
-  const generateTally = () => {
+  const currentParams = (): TallySaveParams => ({
+    fromDate,
+    fromTime,
+    toDate,
+    toTime,
+    orderStatuses,
+    salesChannelIds,
+    excludedOrderIds: [...excludedOrderIds],
+  });
+
+  const generateTally = (overrides?: TallySaveParams) => {
+    const params = overrides ?? currentParams();
+
     fetcher.submit(
       {
-        fromDate,
-        fromTime,
-        toDate,
-        toTime,
-        orderStatuses: JSON.stringify(orderStatuses),
-        salesChannelIds: JSON.stringify(salesChannelIds),
-        excludedOrderIds: JSON.stringify([...excludedOrderIds]),
+        fromDate: params.fromDate,
+        fromTime: params.fromTime,
+        toDate: params.toDate,
+        toTime: params.toTime,
+        orderStatuses: JSON.stringify(params.orderStatuses),
+        salesChannelIds: JSON.stringify(params.salesChannelIds),
+        excludedOrderIds: JSON.stringify(params.excludedOrderIds),
       },
       {
         method: "POST",
+      },
+    );
+  };
+
+  const applySavedTally = (saved: TallySaveParams) => {
+    skipExcludeResetRef.current = true;
+    setFromDate(saved.fromDate);
+    setFromTime(saved.fromTime);
+    setToDate(saved.toDate);
+    setToTime(saved.toTime);
+    setOrderStatuses(saved.orderStatuses);
+    setSalesChannelIds(
+      saved.salesChannelIds.length > 0 ? saved.salesChannelIds : ["all"],
+    );
+    setExcludedOrderIds(new Set(saved.excludedOrderIds));
+    generateTally({
+      ...saved,
+      salesChannelIds:
+        saved.salesChannelIds.length > 0 ? saved.salesChannelIds : ["all"],
+    });
+  };
+
+  useEffect(() => {
+    if (!loadedSaved) return;
+    if (appliedSavedIdRef.current === loadedSaved.id) return;
+
+    appliedSavedIdRef.current = loadedSaved.id;
+    applySavedTally(loadedSaved);
+  }, [loadedSaved]);
+
+  useEffect(() => {
+    if (!saveFetcher.data?.success) return;
+
+    setIsSaveModalOpen(false);
+  }, [saveFetcher.data]);
+
+  const openSaveModal = () => {
+    if (!canSaveTally) return;
+
+    setSaveName(defaultSaveName(currentParams()));
+    setIsSaveModalOpen(true);
+  };
+
+  const saveCurrentTally = () => {
+    const params = currentParams();
+
+    saveFetcher.submit(
+      {
+        intent: "save",
+        name: saveName,
+        fromDate: params.fromDate,
+        fromTime: params.fromTime,
+        toDate: params.toDate,
+        toTime: params.toTime,
+        orderStatuses: JSON.stringify(params.orderStatuses),
+        salesChannelIds: JSON.stringify(params.salesChannelIds),
+        excludedOrderIds: JSON.stringify(params.excludedOrderIds),
+      },
+      {
+        method: "POST",
+        action: "/app/history",
       },
     );
   };
@@ -1180,6 +1269,7 @@ export default function Index() {
   };
 
   const isGenerating = fetcher.state !== "idle";
+  const canSaveTally = Boolean(fetcher.data?.success) && !isGenerating;
   const isLoadingOrders = ordersFetcher.state !== "idle";
   const isLoadingLabels = labelsFetcher.state !== "idle";
   const includedOrders = ordersFetcher.data?.orders ?? [];
@@ -1519,16 +1609,46 @@ export default function Index() {
                           />
                         </div>
 
-                        <button
-                          type="button"
-                          className="generate-button"
-                          onClick={generateTally}
-                          disabled={isGenerating}
-                        >
-                          {isGenerating
-                            ? "Generating..."
-                            : "Generate Product Tally"}
-                        </button>
+                        <div className="generate-actions">
+                          <button
+                            type="button"
+                            className="generate-button"
+                            onClick={() => generateTally()}
+                            disabled={isGenerating}
+                          >
+                            {isGenerating
+                              ? "Generating..."
+                              : "Generate Product Tally"}
+                          </button>
+
+                          <button
+                            type="button"
+                            className="save-button"
+                            onClick={openSaveModal}
+                            disabled={!canSaveTally || saveFetcher.state !== "idle"}
+                          >
+                            Save
+                          </button>
+                        </div>
+
+                        {saveFetcher.data?.success && (
+                          <div className="save-status">
+                            Saved “{saveFetcher.data.name}”.{" "}
+                            <s-link href="/app/history">View history</s-link>
+                          </div>
+                        )}
+
+                        {saveFetcher.data?.error && (
+                          <div className="error-message">
+                            {saveFetcher.data.error}
+                          </div>
+                        )}
+
+                        {shop.loadedSavedError && (
+                          <div className="error-message">
+                            {shop.loadedSavedError}
+                          </div>
+                        )}
 
                         <button
                           type="button"
@@ -2004,6 +2124,53 @@ export default function Index() {
 
         </s-stack>
       </s-page>
+
+      {isSaveModalOpen && (
+        <div
+          className="included-orders-overlay"
+          onClick={() => setIsSaveModalOpen(false)}
+        >
+          <div
+            className="save-popup"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="included-orders-popup-header">
+              <strong>Save tally parameters</strong>
+              <button
+                type="button"
+                className="included-orders-close"
+                onClick={() => setIsSaveModalOpen(false)}
+              >
+                Close
+              </button>
+            </div>
+            <p className="save-popup-copy">
+              This stores the current date range, order status, sales channel,
+              and excluded orders so you can load them later from History.
+            </p>
+            <label className="save-name-label" htmlFor="save-tally-name">
+              Name
+            </label>
+            <input
+              id="save-tally-name"
+              className="save-name-input"
+              value={saveName}
+              onChange={(event) => setSaveName(event.target.value)}
+              placeholder="e.g. Today open orders"
+            />
+            <div className="save-popup-actions">
+              <button
+                type="button"
+                className="save-button"
+                onClick={saveCurrentTally}
+                disabled={saveFetcher.state !== "idle"}
+              >
+                {saveFetcher.state !== "idle" ? "Saving..." : "Save"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {isOrdersModalOpen && (
         <div
@@ -3006,7 +3173,14 @@ export default function Index() {
           }
         }
 
-        .generate-button {
+        .generate-actions {
+          display: grid;
+          grid-template-columns: 1fr auto;
+          gap: 8px;
+        }
+
+        .generate-button,
+        .save-button {
           height: 36px;
           padding: 0 14px;
 
@@ -3024,11 +3198,69 @@ export default function Index() {
           width: 100%;
         }
 
+        .save-button {
+          background: white;
+          color: #1a1a1a;
+          min-width: 88px;
+        }
+
+        .save-status {
+          font-size: 12px;
+          color: #1a7f37;
+          text-align: center;
+        }
+
+        .save-popup {
+          width: min(420px, calc(100vw - 32px));
+          background: white;
+          border-radius: 10px;
+          padding: 16px;
+          box-shadow: 0 16px 40px rgba(0, 0, 0, 0.18);
+        }
+
+        .save-popup-copy {
+          margin: 0 0 12px;
+          font-size: 13px;
+          color: #6d7175;
+        }
+
+        .save-name-label {
+          display: block;
+          font-size: 13px;
+          font-weight: 600;
+          margin-bottom: 6px;
+        }
+
+        .save-name-input {
+          width: 100%;
+          height: 36px;
+          padding: 0 10px;
+          border: 1px solid #b5b5b5;
+          border-radius: 6px;
+          font-size: 13px;
+          box-sizing: border-box;
+        }
+
+        .save-popup-actions {
+          display: flex;
+          justify-content: flex-end;
+          margin-top: 12px;
+        }
+
+        .save-popup-actions .save-button {
+          width: auto;
+        }
+
         .generate-button:hover {
           background: #303030;
         }
 
-        .generate-button:disabled {
+        .save-button:hover {
+          background: #f6f6f6;
+        }
+
+        .generate-button:disabled,
+        .save-button:disabled {
           opacity: 0.6;
           cursor: default;
         }
