@@ -12,12 +12,25 @@ type LineItemNode = {
   title?: string | null;
   name?: string | null;
   quantity?: number | null;
+  currentQuantity?: number | null;
   sku?: string | null;
   variantTitle?: string | null;
   product?: {
     productType?: string | null;
   } | null;
 };
+
+function asLineItemList(lineItems: any): LineItemNode[] | null {
+  if (Array.isArray(lineItems?.nodes)) {
+    return lineItems.nodes;
+  }
+
+  if (Array.isArray(lineItems)) {
+    return lineItems;
+  }
+
+  return null;
+}
 
 type OrderNode = {
   lineItems?: {
@@ -176,8 +189,8 @@ export function tallyOrders(orders: OrderNode[]): {
   }
 
   for (const order of orders) {
-    const lineItems = order.lineItems?.nodes;
-    if (!lineItems) continue;
+    const lineItems = asLineItemList(order.lineItems);
+    if (!lineItems || lineItems.length === 0) continue;
     const salesChannel = orderSalesChannelLabel(order);
 
     for (const item of lineItems) {
@@ -188,7 +201,7 @@ export function tallyOrders(orders: OrderNode[]): {
         : "";
       let baseTitle = item.title || item.name || "";
       const variantTitle = item.variantTitle || "";
-      let quantity = item.quantity || 0;
+      let quantity = Number(item.currentQuantity ?? item.quantity ?? 0);
       const sku = item.sku || "";
 
       if (

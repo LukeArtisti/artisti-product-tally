@@ -9,15 +9,15 @@ import {
 import {
   buildOrderRangeQuery,
   buildTallyOrderQuery,
+  fetchOrdersForTallyFilters,
   fetchOrdersSummary,
   fetchSalesChannels,
   fetchShopTimezone,
   toIncludedOrder,
-  withPickupDeliveryFlags,
 } from "../orders.server";
 
 export async function loader({ request }: LoaderFunctionArgs) {
-  const { admin } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
   const url = new URL(request.url);
 
   const fromDate = String(url.searchParams.get("fromDate") || "");
@@ -58,10 +58,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
       shop.ianaTimezone,
     );
     const orders = filterOrdersBySelection(
-      await withPickupDeliveryFlags(
+      await fetchOrdersForTallyFilters(
         admin,
-        await fetchOrdersSummary(admin, orderQuery),
+        session,
+        fetchOrdersSummary,
+        orderQuery,
         rangeQuery,
+        statuses,
       ),
       statuses,
       salesChannels,

@@ -1,6 +1,7 @@
 import {
   buildOrderStatusQuery,
   EXTRA_SALES_CHANNELS,
+  hasPickupDeliveryMethod,
   orderSalesChannelLabel,
   orderStatusLabel,
   type OrderStatusValue,
@@ -675,20 +676,128 @@ async function fetchPickupOrderIds(admin: any, rangeQuery: string) {
   return pickupIds;
 }
 
+async function fetchPickupIdsFromShippingLines(
+  session: { shop: string; accessToken?: string } | undefined,
+  orders: any[],
+) {
+  const pickupIds = new Set<string>();
+  const ids = [
+    ...new Set(orders.map((order) => gidNumericId(order?.id)).filter(Boolean)),
+  ];
+
+  if (!session?.accessToken || ids.length === 0) {
+    return pickupIds;
+  }
+
+  for (let index = 0; index < ids.length; index += 50) {
+    const chunk = ids.slice(index, index + 50);
+    const params = new URLSearchParams({
+      ids: chunk.join(","),
+      limit: "250",
+      status: "any",
+      fields: "id,shipping_lines",
+    });
+    const response = await fetch(
+      `https://${session.shop}/admin/api/2026-07/orders.json?${params.toString()}`,
+      {
+        headers: {
+          Accept: "application/json",
+          "X-Shopify-Access-Token": session.accessToken,
+        },
+      },
+    );
+
+    if (!response.ok) {
+      continue;
+    }
+
+    const data = (await response.json()) as { orders?: any[] };
+
+    for (const order of data.orders || []) {
+      const lines = Array.isArray(order?.shipping_lines)
+        ? order.shipping_lines
+        : [];
+      const isPickup = lines.some((line: any) =>
+        hasPickupDeliveryMethod({
+          shippingLine: {
+            title: line?.title,
+            code: line?.code,
+            source: line?.source,
+          },
+        }),
+      );
+
+      if (!isPickup) {
+        continue;
+      }
+
+      const numericId = String(order.id);
+      pickupIds.add(numericId);
+      pickupIds.add(`gid://shopify/Order/${numericId}`);
+    }
+  }
+
+  return pickupIds;
+}
+
 export async function withPickupDeliveryFlags<T>(
   admin: any,
   orders: T[],
   rangeQuery: string,
+  options?: {
+    session?: { shop: string; accessToken?: string };
+    treatAllAsPickup?: boolean;
+  },
 ) {
-  const pickupIds = await fetchPickupOrderIds(admin, rangeQuery).catch(
-    () => new Set<string>(),
-  );
+  if (options?.treatAllAsPickup) {
+    return (orders as any[]).map((order) => ({
+      ...order,
+      isPickup: true,
+    })) as T[];
+  }
+
+  const [searchIds, restIds] = await Promise.all([
+    fetchPickupOrderIds(admin, rangeQuery).catch(() => new Set<string>()),
+    fetchPickupIdsFromShippingLines(options?.session, orders as any[]).catch(
+      () => new Set<string>(),
+    ),
+  ]);
+
+  const pickupIds = new Set<string>([...searchIds, ...restIds]);
 
   return (orders as any[]).map((order) => ({
     ...order,
     isPickup:
-      pickupIds.has(order.id) || pickupIds.has(gidNumericId(order.id)),
+      pickupIds.has(order.id) ||
+      pickupIds.has(gidNumericId(order.id)) ||
+      hasPickupDeliveryMethod(order),
   })) as T[];
+}
+
+export async function fetchOrdersForTallyFilters<T>(
+  admin: any,
+  session: { shop: string; accessToken?: string },
+  fetchOrders: (admin: any, orderQuery: string) => Promise<T[]>,
+  orderQuery: string,
+  rangeQuery: string,
+  statuses: OrderStatusValue[],
+) {
+  const pickupOnly = statuses.length === 1 && statuses[0] === "pickup";
+  let orders = await fetchOrders(admin, orderQuery);
+
+  if (pickupOnly && orders.length === 0) {
+    orders = await fetchOrders(
+      admin,
+      `(${rangeQuery}) AND (status:open OR status:closed OR status:cancelled)`,
+    );
+
+    return withPickupDeliveryFlags(admin, orders, rangeQuery, { session });
+  }
+
+  return withPickupDeliveryFlags(admin, orders, rangeQuery, {
+    session,
+    treatAllAsPickup: pickupOnly && orders.length > 0,
+  });
 }
 
 export function toIncludedOrder(order: any): IncludedOrder {

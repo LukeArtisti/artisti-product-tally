@@ -116,7 +116,7 @@ export function buildOrderStatusQuery(statuses: OrderStatusValue[]) {
   }
 
   if (statuses.length === 1 && statuses[0] === "pickup") {
-    return "status:open";
+    return "(delivery_method:pick-up OR delivery_method:pickup)";
   }
 
   if (statuses.length === 1 && statuses[0] === "archived") {
@@ -173,11 +173,7 @@ function deliveryTokens(order: any) {
     .filter(Boolean);
 }
 
-function orderIsPickup(order: any) {
-  if (order?.isPickup === true) {
-    return true;
-  }
-
+export function hasPickupDeliveryMethod(order: any) {
   return deliveryTokens(order).some(
     (token) =>
       token.includes("pickupinstore") ||
@@ -185,6 +181,10 @@ function orderIsPickup(order: any) {
       token.includes("pickup") ||
       token.includes("pickuppoint"),
   );
+}
+
+function orderIsPickup(order: any) {
+  return order?.isPickup === true || hasPickupDeliveryMethod(order);
 }
 
 function orderIsOpen(order: any) {

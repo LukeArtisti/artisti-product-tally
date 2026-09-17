@@ -20,10 +20,10 @@ import {
   buildOrderRangeQuery,
   buildTallyOrderQuery,
   fetchAllOrders,
+  fetchOrdersForTallyFilters,
   fetchSalesChannels,
   fetchShopTimezone,
   gidNumericId,
-  withPickupDeliveryFlags,
 } from "../orders.server";
 import { SHOP_ABN } from "../shipping-label";
 import type {
@@ -970,10 +970,13 @@ export async function action({ request }: ActionFunctionArgs) {
       shop.ianaTimezone,
     );
     const orders = filterOrdersBySelection(
-      await withPickupDeliveryFlags(
+      await fetchOrdersForTallyFilters(
         admin,
-        await fetchAllOrders(admin, orderQuery),
+        session,
+        fetchAllOrders,
+        orderQuery,
         rangeQuery,
+        statuses,
       ),
       statuses,
       salesChannels,
