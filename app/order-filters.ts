@@ -228,6 +228,10 @@ function orderHasNoRemainingFulfillment(order: any) {
 }
 
 function orderIsReadyForPickup(order: any) {
+  if (order?.readyForPickup === true) {
+    return true;
+  }
+
   if (statusIsReadyForPickup(order?.displayFulfillmentStatus)) {
     return true;
   }

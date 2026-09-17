@@ -615,6 +615,174 @@ export async function fetchOrdersSummary(
   return orders;
 }
 
+function chunkValues<T>(values: T[], size: number) {
+  const chunks: T[][] = [];
+
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+
+  return chunks;
+}
+
+function restFulfillmentIsReadyForPickup(fulfillment: any) {
+  const shipmentStatus = String(fulfillment?.shipment_status || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+  const status = String(fulfillment?.status || "").trim().toLowerCase();
+  const displayStatus = String(
+    fulfillment?.display_status || fulfillment?.displayStatus || "",
+  )
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+
+  return (
+    shipmentStatus === "ready_for_pickup" ||
+    displayStatus === "ready_for_pickup" ||
+    status === "ready_for_pickup"
+  );
+}
+
+async function fetchReadyForPickupIdsFromRest(
+  session: { shop: string; accessToken?: string },
+  orders: any[],
+) {
+  const ids = [
+    ...new Set(orders.map((order) => gidNumericId(order?.id)).filter(Boolean)),
+  ];
+  const readyIds = new Set<string>();
+
+  if (!session.accessToken || ids.length === 0) {
+    return readyIds;
+  }
+
+  for (const chunk of chunkValues(ids, 50)) {
+    const params = new URLSearchParams({
+      ids: chunk.join(","),
+      limit: "250",
+      fields: "id,fulfillments",
+      status: "any",
+    });
+    const response = await fetch(
+      `https://${session.shop}/admin/api/2026-07/orders.json?${params.toString()}`,
+      {
+        headers: {
+          Accept: "application/json",
+          "X-Shopify-Access-Token": session.accessToken,
+        },
+      },
+    );
+
+    if (!response.ok) {
+      continue;
+    }
+
+    const data = (await response.json()) as { orders?: any[] };
+
+    for (const order of data.orders || []) {
+      const fulfillments = Array.isArray(order?.fulfillments)
+        ? order.fulfillments
+        : [];
+
+      if (!fulfillments.some(restFulfillmentIsReadyForPickup)) {
+        continue;
+      }
+
+      const numericId = String(order.id);
+      readyIds.add(numericId);
+      readyIds.add(`gid://shopify/Order/${numericId}`);
+    }
+  }
+
+  return readyIds;
+}
+
+async function fetchReadyForPickupIdsFromSearch(
+  admin: any,
+  rangeQuery: string,
+) {
+  const readyIds = new Set<string>();
+  const query = `(${rangeQuery}) AND fulfillment_status:ready_for_pickup`;
+  let after: string | null = null;
+  let hasNextPage = true;
+  let pages = 0;
+
+  while (hasNextPage && pages < 20) {
+    const response: any = await admin.graphql(
+      `#graphql
+        query ReadyForPickupOrderIds($first: Int!, $after: String, $query: String!) {
+          orders(first: $first, after: $after, query: $query) {
+            nodes {
+              id
+            }
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+          }
+        }`,
+      {
+        variables: {
+          first: 50,
+          after,
+          query,
+        },
+      },
+    );
+
+    const data = await response.json();
+
+    if (data.errors) {
+      break;
+    }
+
+    const connection = data.data?.orders;
+
+    if (!connection) {
+      break;
+    }
+
+    for (const order of connection.nodes || []) {
+      if (order?.id) {
+        readyIds.add(order.id);
+        readyIds.add(gidNumericId(order.id));
+      }
+    }
+
+    hasNextPage = Boolean(connection.pageInfo?.hasNextPage);
+    after = connection.pageInfo?.endCursor || null;
+    pages += 1;
+  }
+
+  return readyIds;
+}
+
+export async function withReadyForPickupFlags<T>(
+  admin: any,
+  session: { shop: string; accessToken?: string },
+  orders: T[],
+  rangeQuery: string,
+) {
+  const [restIds, searchIds] = await Promise.all([
+    fetchReadyForPickupIdsFromRest(session, orders as any[]).catch(
+      () => new Set<string>(),
+    ),
+    fetchReadyForPickupIdsFromSearch(admin, rangeQuery).catch(
+      () => new Set<string>(),
+    ),
+  ]);
+
+  const readyIds = new Set<string>([...restIds, ...searchIds]);
+
+  return (orders as any[]).map((order) => ({
+    ...order,
+    readyForPickup:
+      readyIds.has(order.id) || readyIds.has(gidNumericId(order.id)),
+  })) as T[];
+}
+
 export function toIncludedOrder(order: any): IncludedOrder {
   return {
     id: order.id,
