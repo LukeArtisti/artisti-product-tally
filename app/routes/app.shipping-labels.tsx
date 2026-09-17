@@ -88,7 +88,6 @@ export async function loader({ request }: LoaderFunctionArgs) {
         fetchShippingLabelOrders,
         orderQuery,
         rangeQuery,
-        statuses,
       ),
       statuses,
       salesChannels,

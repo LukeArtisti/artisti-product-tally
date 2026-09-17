@@ -746,16 +746,8 @@ export async function withPickupDeliveryFlags<T>(
   rangeQuery: string,
   options?: {
     session?: { shop: string; accessToken?: string };
-    treatAllAsPickup?: boolean;
   },
 ) {
-  if (options?.treatAllAsPickup) {
-    return (orders as any[]).map((order) => ({
-      ...order,
-      isPickup: true,
-    })) as T[];
-  }
-
   const [searchIds, restIds] = await Promise.all([
     fetchPickupOrderIds(admin, rangeQuery).catch(() => new Set<string>()),
     fetchPickupIdsFromShippingLines(options?.session, orders as any[]).catch(
@@ -780,24 +772,10 @@ export async function fetchOrdersForTallyFilters<T>(
   fetchOrders: (admin: any, orderQuery: string) => Promise<T[]>,
   orderQuery: string,
   rangeQuery: string,
-  statuses: OrderStatusValue[],
 ) {
-  const pickupOnly = statuses.length === 1 && statuses[0] === "pickup";
-  let orders = await fetchOrders(admin, orderQuery);
+  const orders = await fetchOrders(admin, orderQuery);
 
-  if (pickupOnly && orders.length === 0) {
-    orders = await fetchOrders(
-      admin,
-      `(${rangeQuery}) AND (status:open OR status:closed OR status:cancelled)`,
-    );
-
-    return withPickupDeliveryFlags(admin, orders, rangeQuery, { session });
-  }
-
-  return withPickupDeliveryFlags(admin, orders, rangeQuery, {
-    session,
-    treatAllAsPickup: pickupOnly && orders.length > 0,
-  });
+  return withPickupDeliveryFlags(admin, orders, rangeQuery, { session });
 }
 
 export function toIncludedOrder(order: any): IncludedOrder {

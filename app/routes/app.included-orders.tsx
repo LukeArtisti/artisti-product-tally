@@ -64,7 +64,6 @@ export async function loader({ request }: LoaderFunctionArgs) {
         fetchOrdersSummary,
         orderQuery,
         rangeQuery,
-        statuses,
       ),
       statuses,
       salesChannels,

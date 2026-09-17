@@ -976,7 +976,6 @@ export async function action({ request }: ActionFunctionArgs) {
         fetchAllOrders,
         orderQuery,
         rangeQuery,
-        statuses,
       ),
       statuses,
       salesChannels,

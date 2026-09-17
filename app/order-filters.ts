@@ -19,7 +19,6 @@ export const EXTRA_SALES_CHANNELS: SalesChannelOption[] = [
 
 export const ORDER_STATUS_OPTIONS = [
   { value: "unfulfilled", label: "Unfulfilled" },
-  { value: "pickup", label: "Pick up" },
   { value: "on_hold", label: "On hold" },
   { value: "unpaid", label: "Unpaid" },
   { value: "open", label: "Open" },
@@ -34,10 +33,6 @@ const ORDER_STATUS_VALUES = new Set<string>(
 );
 
 function normalizeSavedStatus(value: string): OrderStatusValue | null {
-  if (value === "ready_for_pickup") {
-    return "pickup";
-  }
-
   return ORDER_STATUS_VALUES.has(value) ? (value as OrderStatusValue) : null;
 }
 
@@ -89,7 +84,6 @@ export function parseSalesChannelIds(value: FormDataEntryValue | string | null) 
 
 const STATUS_FACETS: OrderStatusValue[] = [
   "unfulfilled",
-  "pickup",
   "on_hold",
   "unpaid",
   "open",
@@ -113,10 +107,6 @@ export function buildOrderStatusQuery(statuses: OrderStatusValue[]) {
 
   if (statuses.length === 1 && statuses[0] === "open") {
     return "status:open";
-  }
-
-  if (statuses.length === 1 && statuses[0] === "pickup") {
-    return "(delivery_method:pick-up OR delivery_method:pickup)";
   }
 
   if (statuses.length === 1 && statuses[0] === "archived") {
@@ -188,12 +178,7 @@ function orderIsPickup(order: any) {
 }
 
 function orderIsOpen(order: any) {
-  return (
-    !order?.cancelledAt &&
-    !order?.closed &&
-    !order?.closedAt &&
-    !orderIsPickup(order)
-  );
+  return !order?.cancelledAt && !order?.closed && !order?.closedAt;
 }
 
 function orderIsArchived(order: any) {
@@ -201,10 +186,6 @@ function orderIsArchived(order: any) {
 }
 
 function orderIsUnfulfilled(order: any) {
-  if (orderIsPickup(order)) {
-    return false;
-  }
-
   const status = normalizeStatus(order?.displayFulfillmentStatus);
 
   return [
@@ -281,7 +262,6 @@ function orderMatchesStatuses(order: any, statuses: OrderStatusValue[]) {
     if (status === "open") return orderIsOpen(order);
     if (status === "archived") return orderIsArchived(order);
     if (status === "unfulfilled") return orderIsUnfulfilled(order);
-    if (status === "pickup") return orderIsPickup(order);
     if (status === "on_hold") return orderIsOnHold(order);
     if (status === "unpaid") return orderIsUnpaid(order);
     return false;
