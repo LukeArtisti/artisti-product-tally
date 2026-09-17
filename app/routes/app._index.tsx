@@ -92,6 +92,11 @@ function formatTimezoneLabel(shop: Pick<ShopTimezone, "timezoneAbbreviation" | "
   return `${shop.timezoneAbbreviation} ${shop.timezoneOffset}`;
 }
 
+function orderAdminNumericId(gid: string | null | undefined) {
+  const match = String(gid || "").match(/(\d+)\s*$/);
+  return match?.[1] || "";
+}
+
 type FilterOption = {
   value: string;
   label: string;
@@ -2247,6 +2252,7 @@ export default function Index() {
                       </th>
                       <th>Order</th>
                       <th>Order date</th>
+                      <th>Order status</th>
                       <th>Sales channel</th>
                       <th>Items</th>
                     </tr>
@@ -2254,6 +2260,7 @@ export default function Index() {
                   <tbody>
                     {includedOrders.map((order) => {
                       const isIncluded = !excludedOrderIds.has(order.id);
+                      const orderAdminId = orderAdminNumericId(order.id);
 
                       return (
                         <tr
@@ -2268,8 +2275,22 @@ export default function Index() {
                               aria-label={`Include ${order.name}`}
                             />
                           </td>
-                          <td>{order.name}</td>
+                          <td>
+                            {orderAdminId ? (
+                              <a
+                                className="included-order-admin-link"
+                                href={`shopify://admin/orders/${orderAdminId}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                              >
+                                {order.name}
+                              </a>
+                            ) : (
+                              order.name
+                            )}
+                          </td>
                           <td>{formatOrderDateTime(order.processedAt)}</td>
+                          <td>{order.orderStatus}</td>
                           <td>{order.salesChannel}</td>
                           <td>{order.itemCount}</td>
                         </tr>
@@ -2958,7 +2979,20 @@ export default function Index() {
           cursor: pointer;
         }
 
+        .included-order-admin-link {
+          color: #2c6ecb;
+          text-decoration: underline;
+        }
+
+        .included-order-admin-link:hover {
+          color: #1f5199;
+        }
+
         .included-orders-table-wrap tr.is-excluded td {
+          color: #8c9196;
+        }
+
+        .included-orders-table-wrap tr.is-excluded .included-order-admin-link {
           color: #8c9196;
         }
 

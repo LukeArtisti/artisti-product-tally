@@ -47,5 +47,6 @@ export type IncludedOrder = {
   name: string;
   processedAt: string;
   salesChannel: string;
+  orderStatus: string;
   itemCount: number;
 };

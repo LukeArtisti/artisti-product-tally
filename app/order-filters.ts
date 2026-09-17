@@ -19,6 +19,8 @@ export const EXTRA_SALES_CHANNELS: SalesChannelOption[] = [
 
 export const ORDER_STATUS_OPTIONS = [
   { value: "unfulfilled", label: "Unfulfilled" },
+  { value: "ready_for_pickup", label: "Ready for pickup" },
+  { value: "on_hold", label: "On hold" },
   { value: "unpaid", label: "Unpaid" },
   { value: "open", label: "Open" },
   { value: "archived", label: "Archived" },
@@ -79,6 +81,8 @@ export function parseSalesChannelIds(value: FormDataEntryValue | string | null) 
 
 const STATUS_FACETS: OrderStatusValue[] = [
   "unfulfilled",
+  "ready_for_pickup",
+  "on_hold",
   "unpaid",
   "open",
   "archived",
@@ -133,9 +137,82 @@ function orderIsUnfulfilled(order: any) {
     "PARTIAL",
     "PARTIALLY_FULFILLED",
     "UNSHIPPED",
-    "ON_HOLD",
     "SCHEDULED",
   ].includes(status);
+}
+
+function orderIsOnHold(order: any) {
+  return String(order?.displayFulfillmentStatus || "").toUpperCase() === "ON_HOLD";
+}
+
+function fulfillmentRecords(order: any) {
+  if (Array.isArray(order?.fulfillments)) {
+    return order.fulfillments;
+  }
+
+  if (Array.isArray(order?.fulfillments?.nodes)) {
+    return order.fulfillments.nodes;
+  }
+
+  return [];
+}
+
+function orderIsReadyForPickup(order: any) {
+  const orderStatus = String(order?.displayFulfillmentStatus || "").toUpperCase();
+
+  if (orderStatus === "READY_FOR_PICKUP") {
+    return true;
+  }
+
+  return fulfillmentRecords(order).some((fulfillment: any) => {
+    const displayStatus = String(fulfillment?.displayStatus || "").toUpperCase();
+    const shipmentStatus = String(fulfillment?.shipmentStatus || "").toUpperCase();
+
+    return (
+      displayStatus === "READY_FOR_PICKUP" ||
+      shipmentStatus === "READY_FOR_PICKUP"
+    );
+  });
+}
+
+export function orderStatusLabel(order: any) {
+  if (orderIsReadyForPickup(order)) {
+    return "Ready for pickup";
+  }
+
+  if (orderIsOnHold(order)) {
+    return "On hold";
+  }
+
+  const status = String(order?.displayFulfillmentStatus || "").toUpperCase();
+
+  if (!status) {
+    return "Unknown";
+  }
+
+  const labels: Record<string, string> = {
+    UNFULFILLED: "Unfulfilled",
+    PARTIAL: "Partially fulfilled",
+    PARTIALLY_FULFILLED: "Partially fulfilled",
+    UNSHIPPED: "Unfulfilled",
+    FULFILLED: "Fulfilled",
+    IN_PROGRESS: "In progress",
+    ON_HOLD: "On hold",
+    SCHEDULED: "Scheduled",
+    PENDING_FULFILLMENT: "Pending fulfillment",
+    OPEN: "Open",
+    REQUEST_DECLINED: "Request declined",
+    RESTOCKED: "Restocked",
+    READY_FOR_PICKUP: "Ready for pickup",
+  };
+
+  return (
+    labels[status] ||
+    status
+      .toLowerCase()
+      .replace(/_/g, " ")
+      .replace(/\b\w/g, (letter) => letter.toUpperCase())
+  );
 }
 
 function orderIsUnpaid(order: any) {
@@ -159,6 +236,8 @@ function orderMatchesStatuses(order: any, statuses: OrderStatusValue[]) {
     if (status === "open") return orderIsOpen(order);
     if (status === "archived") return orderIsArchived(order);
     if (status === "unfulfilled") return orderIsUnfulfilled(order);
+    if (status === "ready_for_pickup") return orderIsReadyForPickup(order);
+    if (status === "on_hold") return orderIsOnHold(order);
     if (status === "unpaid") return orderIsUnpaid(order);
     return false;
   });

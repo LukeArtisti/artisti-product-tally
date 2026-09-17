@@ -2,6 +2,7 @@ import {
   buildOrderStatusQuery,
   EXTRA_SALES_CHANNELS,
   orderSalesChannelLabel,
+  orderStatusLabel,
   type OrderStatusValue,
   type SalesChannelOption,
 } from "./order-filters";
@@ -469,6 +470,9 @@ export async function fetchAllOrders(
               cancelledAt
               displayFinancialStatus
               displayFulfillmentStatus
+              fulfillments(first: 20) {
+                displayStatus
+              }
               ${ORDER_CHANNEL_FIELDS}
 
               lineItems(first: 250) {
@@ -557,6 +561,9 @@ export async function fetchOrdersSummary(
               cancelledAt
               displayFinancialStatus
               displayFulfillmentStatus
+              fulfillments(first: 20) {
+                displayStatus
+              }
               ${ORDER_CHANNEL_FIELDS}
               currentSubtotalLineItemsQuantity
               subtotalLineItemsQuantity
@@ -604,6 +611,7 @@ export function toIncludedOrder(order: any): IncludedOrder {
     name: order.name,
     processedAt: order.processedAt || order.createdAt,
     salesChannel: orderSalesChannelLabel(order),
+    orderStatus: orderStatusLabel(order),
     itemCount:
       order.subtotalLineItemsQuantity ||
       order.currentSubtotalLineItemsQuantity ||
@@ -736,6 +744,9 @@ const SHIPPING_LABEL_ORDER_FIELDS = `
   cancelledAt
   displayFinancialStatus
   displayFulfillmentStatus
+  fulfillments(first: 20) {
+    displayStatus
+  }
   ${ORDER_CHANNEL_FIELDS}
   customAttributes {
     key
