@@ -109,7 +109,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       error:
         error instanceof Error
           ? error.message
-          : "Failed to load shipping labels.",
+          : "Failed to load packing slips.",
       shop: null,
       orders: [],
     };

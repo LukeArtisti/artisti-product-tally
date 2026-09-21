@@ -32,7 +32,13 @@ import type {
   ShopPrintInfo,
   ShopTimezone,
 } from "../shipping-label";
-import { tallyOrders, type TallyItem } from "../tally.server";
+import { tallyOrders } from "../tally.server";
+import {
+  formatCoffeeWeight,
+  summarizeCoffeeToGrind,
+  type CoffeeGrindSummary,
+  type TallyItem,
+} from "../tally";
 import {
   defaultSaveName,
   parseExcludedOrderIds,
@@ -46,8 +52,10 @@ type TallyResponse = {
   orderCount?: number;
   orderIds?: string[];
   coffeeProducts?: TallyItem[];
+  machinesAndGrinders?: TallyItem[];
   accessories?: TallyItem[];
   totalCoffeeItems?: number;
+  totalMachineItems?: number;
   totalAccessoryItems?: number;
   totalItems?: number;
 };
@@ -767,6 +775,171 @@ function shippingSlipInnerHtml(
   `;
 }
 
+type PackingPrintSheet = {
+  heading: string;
+  subheading?: string;
+  headers: string[];
+  rows: Array<Array<string | number>>;
+  totalLabel: string;
+  totalValue: number;
+  grindSummary?: CoffeeGrindSummary[];
+};
+
+function grindSummaryPrintHtml(summaries: CoffeeGrindSummary[]) {
+  if (summaries.length === 0) return "";
+
+  const bodyRows = summaries
+    .flatMap((summary) =>
+      summary.sizes.map(
+        (line) => `<tr>
+        <td>${escapeHtml(summary.name)}</td>
+        <td>${escapeHtml(line.sizeLabel)}</td>
+        <td class="num">${line.bags}</td>
+        <td class="num">${escapeHtml(formatCoffeeWeight(line.grams))}</td>
+      </tr>`,
+      ),
+    )
+    .join("");
+
+  const grandTotal = summaries.reduce((sum, summary) => sum + summary.totalGrams, 0);
+
+  return `<div class="grind">
+      <h3>Coffee to grind</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Coffee</th>
+            <th>Size</th>
+            <th>Bags</th>
+            <th>Weight</th>
+          </tr>
+        </thead>
+        <tbody>${bodyRows}
+          <tr class="grind-product-total">
+            <td colspan="3"><strong>Total coffee to grind</strong></td>
+            <td class="num"><strong>${escapeHtml(formatCoffeeWeight(grandTotal))}</strong></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>`;
+}
+
+function buildPackingSheetPrintHtml(title: string, rangeText: string, sheets: PackingPrintSheet[]) {
+  const pages = sheets
+    .map((sheet) => {
+      const headerCells = sheet.headers
+        .map((header) => `<th>${escapeHtml(header)}</th>`)
+        .join("");
+      const bodyRows = sheet.rows
+        .map(
+          (row) =>
+            `<tr>${row
+              .map((cell, index) => {
+                const isNumber = typeof cell === "number";
+                const text = isNumber ? String(cell) : escapeHtml(String(cell ?? ""));
+                return `<td${isNumber || index === row.length - 1 ? ' class="num"' : ""}>${text}</td>`;
+              })
+              .join("")}</tr>`,
+        )
+        .join("");
+
+      return `<article class="sheet">
+      <p class="range">${escapeHtml(rangeText)}</p>
+      <h1>${escapeHtml(sheet.heading)}</h1>
+      ${sheet.subheading ? `<h2>${escapeHtml(sheet.subheading)}</h2>` : ""}
+      ${sheet.grindSummary ? grindSummaryPrintHtml(sheet.grindSummary) : ""}
+      <table>
+        <thead><tr>${headerCells}</tr></thead>
+        <tbody>${bodyRows}</tbody>
+      </table>
+      <div class="total">
+        <strong>${escapeHtml(sheet.totalLabel)}</strong>
+        <strong>${sheet.totalValue}</strong>
+      </div>
+    </article>`;
+    })
+    .join("");
+
+  return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>${escapeHtml(title)}</title>
+    <link rel="stylesheet" href="https://cdn.shopify.com/static/fonts/inter/v4/styles.css" />
+    <style>
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        color: #111;
+        font-family: Inter, Helvetica, Arial, sans-serif;
+        font-size: 13px;
+        line-height: 1.4;
+      }
+      .sheet {
+        max-width: 760px;
+        margin: 0 auto 24px;
+        padding: 24px 28px 16px;
+        page-break-after: always;
+      }
+      .sheet:last-child { page-break-after: auto; }
+      .range {
+        margin: 0 0 8px;
+        color: #555;
+        font-size: 12px;
+      }
+      h1 {
+        margin: 0 0 4px;
+        font-size: 22px;
+      }
+      h2 {
+        margin: 0 0 16px;
+        font-size: 16px;
+        font-weight: 600;
+      }
+      table {
+        border-collapse: collapse;
+        width: auto;
+        max-width: 100%;
+      }
+      th, td {
+        padding: 6px 18px 6px 0;
+        text-align: left;
+        vertical-align: top;
+        white-space: nowrap;
+        border-bottom: 1px solid #ddd;
+      }
+      th:last-child, td:last-child, td.num {
+        text-align: right;
+        padding-right: 0;
+      }
+      h3 {
+        margin: 0 0 10px;
+        font-size: 16px;
+      }
+      .grind {
+        margin-bottom: 28px;
+      }
+      .grind-product-total td {
+        border-bottom: 2px solid #111;
+      }
+      .total {
+        display: flex;
+        justify-content: space-between;
+        max-width: 100%;
+        margin-top: 14px;
+        padding-top: 10px;
+        border-top: 2px solid #111;
+        font-size: 14px;
+      }
+      @media print {
+        .sheet { max-width: none; margin: 0; padding: 0; }
+      }
+    </style>
+  </head>
+  <body>${pages}</body>
+</html>`;
+}
+
 function printHtmlDocument(html: string) {
   const iframe = document.createElement("iframe");
   const url = URL.createObjectURL(new Blob([html], { type: "text/html" }));
@@ -811,7 +984,7 @@ function buildShippingLabelPrintHtml(
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>Shipping labels</title>
+    <title>Packing slips</title>
     <link rel="stylesheet" href="https://cdn.shopify.com/static/fonts/inter/v4/styles.css" />
     <style>
       * { box-sizing: border-box; }
@@ -987,9 +1160,15 @@ export async function action({ request }: ActionFunctionArgs) {
     const orderIds = ordersToTally
       .map((order) => gidNumericId(order.id))
       .filter(Boolean);
-    const { coffeeProducts, accessories } = tallyOrders(ordersToTally);
+    const { coffeeProducts, machinesAndGrinders, accessories } =
+      tallyOrders(ordersToTally);
 
     const totalCoffeeItems = coffeeProducts.reduce(
+      (sum, item) => sum + item.quantity,
+      0,
+    );
+
+    const totalMachineItems = machinesAndGrinders.reduce(
       (sum, item) => sum + item.quantity,
       0,
     );
@@ -1004,10 +1183,12 @@ export async function action({ request }: ActionFunctionArgs) {
       orderCount: ordersToTally.length,
       orderIds,
       coffeeProducts,
+      machinesAndGrinders,
       accessories,
       totalCoffeeItems,
+      totalMachineItems,
       totalAccessoryItems,
-      totalItems: totalCoffeeItems + totalAccessoryItems,
+      totalItems: totalCoffeeItems + totalMachineItems + totalAccessoryItems,
     });
   } catch (error) {
     console.error(error);
@@ -1065,9 +1246,15 @@ export default function Index() {
   const appliedSavedIdRef = useRef<string | null>(null);
 
   const coffeeProducts = fetcher.data?.coffeeProducts ?? [];
+  const machinesAndGrinders = fetcher.data?.machinesAndGrinders ?? [];
   const accessories = fetcher.data?.accessories ?? [];
 
   const totalCoffeeItems = coffeeProducts.reduce(
+    (sum, item) => sum + item.quantity,
+    0,
+  );
+
+  const totalMachineItems = machinesAndGrinders.reduce(
     (sum, item) => sum + item.quantity,
     0,
   );
@@ -1077,7 +1264,7 @@ export default function Index() {
     0,
   );
 
-  const totalItems = totalCoffeeItems + totalAccessoryItems;
+  const totalItems = totalCoffeeItems + totalMachineItems + totalAccessoryItems;
 
   const formatDate = (date: string) => {
     if (!date) return "";
@@ -1334,70 +1521,119 @@ export default function Index() {
     });
   };
 
-  const csvCell = (value: string | number) => {
-    const text = String(value ?? "");
+  const packingRangeText = `${formatDate(fromDate)} ${formatTime12h(fromTime)} to ${formatDate(toDate)} ${formatTime12h(toTime)} (${timezoneLabel})`;
 
-    if (/[",\n\r]/.test(text)) {
-      return `"${text.replace(/"/g, '""')}"`;
-    }
-
-    return text;
-  };
-
-  const downloadCsv = (filename: string, headers: string[], rows: Array<Array<string | number>>) => {
-    const lines = [
-      headers.map(csvCell).join(","),
-      ...rows.map((row) => row.map(csvCell).join(",")),
-    ];
-    const csv = `\uFEFF${lines.join("\r\n")}`;
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-
-    link.href = url;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-  };
-
-  const rangeLabel = `${fromDate}_${fromTime.replace(":", "")}-to-${toDate}_${toTime.replace(":", "")}`;
-
-  const downloadCoffeeCsv = () => {
+  const printCoffeeSheets = () => {
     if (coffeeProducts.length === 0) return;
 
-    downloadCsv(
-      `bean-packing-team-${rangeLabel}.csv`,
-      ["SKU", "Product Name", "Variant", "Sales Channel", "Quantity"],
-      [
-        ...coffeeProducts.map((item) => [
-          item.sku || "",
-          item.name,
-          item.variant || "",
-          item.salesChannel || "",
-          item.quantity,
-        ]),
-        ["", "", "", "Total Coffee Items", totalCoffeeItems],
-      ],
+    const byChannel = new Map<string, typeof coffeeProducts>();
+
+    for (const item of coffeeProducts) {
+      const channel = item.salesChannel?.trim() || "Unknown";
+      const group = byChannel.get(channel);
+
+      if (group) {
+        group.push(item);
+      } else {
+        byChannel.set(channel, [item]);
+      }
+    }
+
+    const toCoffeeSheet = (subheading: string, items: typeof coffeeProducts) => ({
+      heading: "Bean Packing Team Copy",
+      subheading,
+      headers: ["SKU", "Product Name", "Variant", "Quantity"],
+      rows: items.map((item) => [
+        item.sku || "",
+        item.name,
+        item.variant || "",
+        item.quantity,
+      ]),
+      totalLabel: "Total Coffee Items",
+      totalValue: items.reduce((sum, item) => sum + item.quantity, 0),
+      grindSummary: summarizeCoffeeToGrind(items),
+    });
+
+    const combinedItems = [...byChannel.values()].flat();
+    const combinedByProduct = new Map<string, (typeof coffeeProducts)[number]>();
+
+    for (const item of combinedItems) {
+      const key = `${item.sku}\u0001${item.name}\u0001${item.variant || ""}`;
+      const existing = combinedByProduct.get(key);
+
+      if (existing) {
+        existing.quantity += item.quantity;
+        existing.bagCount = (existing.bagCount ?? 0) + (item.bagCount ?? 0);
+      } else {
+        combinedByProduct.set(key, { ...item });
+      }
+    }
+
+    const sheets = [
+      ...[...byChannel.entries()].map(([channel, items]) =>
+        toCoffeeSheet(channel, items),
+      ),
+      toCoffeeSheet("All sales channels", [...combinedByProduct.values()]),
+    ];
+
+    printHtmlDocument(
+      buildPackingSheetPrintHtml("Bean Packing Team Copy", packingRangeText, sheets),
     );
   };
 
-  const downloadAccessoriesCsv = () => {
+  const printMachinesAndGrindersSheet = () => {
+    if (machinesAndGrinders.length === 0) return;
+
+    printHtmlDocument(
+      buildPackingSheetPrintHtml("Coffee Machines and Grinders", packingRangeText, [
+        {
+          heading: "Coffee Machines and Grinders",
+          headers: ["SKU", "Brand", "Item Name", "Sales Channel", "Quantity"],
+          rows: machinesAndGrinders.map((item) => [
+            item.sku || "",
+            item.vendor || "",
+            item.variant ? `${item.name} – ${item.variant}` : item.name,
+            item.salesChannel || "",
+            item.quantity,
+          ]),
+          totalLabel: "Total Machine and Grinder Items",
+          totalValue: totalMachineItems,
+        },
+      ]),
+    );
+  };
+
+  const printAccessoriesSheet = () => {
     if (accessories.length === 0) return;
 
-    downloadCsv(
-      `bar-staff-${rangeLabel}.csv`,
-      ["SKU", "Item Name", "Sales Channel", "Quantity"],
-      [
-        ...accessories.map((item) => [
-          item.sku || "",
-          item.variant ? `${item.name} – ${item.variant}` : item.name,
-          item.salesChannel || "",
-          item.quantity,
-        ]),
-        ["", "", "Total Accessory Items", totalAccessoryItems],
-      ],
+    const byChannel = new Map<string, typeof accessories>();
+
+    for (const item of accessories) {
+      const channel = item.salesChannel?.trim() || "Unknown";
+      const group = byChannel.get(channel);
+
+      if (group) {
+        group.push(item);
+      } else {
+        byChannel.set(channel, [item]);
+      }
+    }
+
+    const sheets = [...byChannel.entries()].map(([channel, items]) => ({
+      heading: "Bar Staff Copy",
+      subheading: channel,
+      headers: ["SKU", "Item Name", "Quantity"],
+      rows: items.map((item) => [
+        item.sku || "",
+        item.variant ? `${item.name} – ${item.variant}` : item.name,
+        item.quantity,
+      ]),
+      totalLabel: "Total Accessory Items",
+      totalValue: items.reduce((sum, item) => sum + item.quantity, 0),
+    }));
+
+    printHtmlDocument(
+      buildPackingSheetPrintHtml("Bar Staff Copy", packingRangeText, sheets),
     );
   };
 
@@ -1791,6 +2027,85 @@ export default function Index() {
                     </div>
 
 
+                    {/* MACHINES AND GRINDERS */}
+                    <div className="preview-card">
+
+                      <div className="preview-header">
+
+                        <strong>
+                          Coffee Machines and Grinders Preview
+                        </strong>
+
+                        <span>
+                          {totalMachineItems} items
+                        </span>
+
+                      </div>
+
+                      <div className="preview-table-wrap">
+                        <table>
+
+                          <thead>
+                            <tr>
+                              <th>SKU</th>
+                              <th>Brand</th>
+                              <th>Item Name</th>
+                              <th>Sales Channel</th>
+                              <th>Quantity</th>
+                            </tr>
+                          </thead>
+
+                          <tbody>
+                            {isGenerating ? (
+                              <tr>
+                                <td colSpan={5} className="preview-empty">
+                                  Loading machines and grinders from orders...
+                                </td>
+                              </tr>
+                            ) : machinesAndGrinders.length === 0 ? (
+                              <tr>
+                                <td colSpan={5} className="preview-empty">
+                                  {fetcher.data?.success
+                                    ? "No coffee machines or grinders in this order range."
+                                    : "Generate a product tally to preview machines and grinders."}
+                                </td>
+                              </tr>
+                            ) : (
+                              machinesAndGrinders.map((item) => (
+                                <tr
+                                  key={`${item.sku}-${item.name}-${item.variant}-${item.salesChannel}-${item.kind}`}
+                                >
+                                  <td>{item.sku || "—"}</td>
+                                  <td>{item.vendor || "—"}</td>
+                                  <td>
+                                    {item.name}
+                                    {item.variant ? ` – ${item.variant}` : ""}
+                                  </td>
+                                  <td>{item.salesChannel}</td>
+                                  <td>{item.quantity}</td>
+                                </tr>
+                              ))
+                            )}
+                          </tbody>
+
+                        </table>
+                      </div>
+
+                      <div className="preview-total">
+
+                        <strong>
+                          Total Machine and Grinder Items
+                        </strong>
+
+                        <strong>
+                          {totalMachineItems}
+                        </strong>
+
+                      </div>
+
+                    </div>
+
+
                     {/* ACCESSORIES */}
                     <div className="preview-card">
 
@@ -1886,8 +2201,8 @@ export default function Index() {
                     </div>
 
                     <div className="generate-print-description">
-                      Download CSV packing sheets, or print shipping labels for
-                      the orders in this tally.
+                      Print packing sheets, or packing slips for the orders
+                      in this tally.
                     </div>
 
                   </div>
@@ -1897,7 +2212,7 @@ export default function Index() {
                     <button
                       type="button"
                       className="print-button"
-                      onClick={downloadCoffeeCsv}
+                      onClick={printCoffeeSheets}
                       disabled={isGenerating || coffeeProducts.length === 0}
                     >
 
@@ -1925,7 +2240,7 @@ export default function Index() {
                         </strong>
 
                         <span>
-                          Coffee products only
+                          Coffee products, one page per sales channel plus all channels combined
                         </span>
 
                       </span>
@@ -1936,7 +2251,47 @@ export default function Index() {
                     <button
                       type="button"
                       className="print-button"
-                      onClick={downloadAccessoriesCsv}
+                      onClick={printMachinesAndGrindersSheet}
+                      disabled={isGenerating || machinesAndGrinders.length === 0}
+                    >
+
+                      <span className="print-icon">
+                        <svg
+                          viewBox="0 0 24 24"
+                          width="22"
+                          height="22"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.8"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <rect x="3" y="7" width="18" height="12" rx="2" />
+                          <path d="M7 7V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v2" />
+                          <path d="M8 13h8" />
+                          <path d="M8 16h4" />
+                        </svg>
+                      </span>
+
+                      <span className="print-button-content">
+
+                        <strong>
+                          Print Coffee Machines and Grinders
+                        </strong>
+
+                        <span>
+                          Theme templates, plus Coffee machine / home equipment tags
+                        </span>
+
+                      </span>
+
+                    </button>
+
+
+                    <button
+                      type="button"
+                      className="print-button"
+                      onClick={printAccessoriesSheet}
                       disabled={isGenerating || accessories.length === 0}
                     >
 
@@ -1965,7 +2320,7 @@ export default function Index() {
                         </strong>
 
                         <span>
-                          Accessories only
+                          Accessories, one page per sales channel
                         </span>
 
                       </span>
@@ -2005,7 +2360,7 @@ export default function Index() {
                       <span className="print-button-content">
 
                         <strong>
-                          Print Shipping Label
+                          Print Packing Slip
                         </strong>
 
                         <span>
@@ -2089,6 +2444,18 @@ export default function Index() {
 
                     <strong>
                       {totalCoffeeItems}
+                    </strong>
+
+                  </div>
+
+                  <div className="summary-row">
+
+                    <span>
+                      Total Machines and Grinders
+                    </span>
+
+                    <strong>
+                      {totalMachineItems}
                     </strong>
 
                   </div>
@@ -2332,7 +2699,7 @@ export default function Index() {
               <div className="print-labels-preview">
                 {isLoadingLabels && (
                   <p className="print-labels-status">
-                    Loading shipping labels...
+                    Loading packing slips...
                   </p>
                 )}
 
@@ -2372,7 +2739,7 @@ export default function Index() {
                 <div className="print-labels-sidebar-title">Documents</div>
                 <label className="print-labels-option">
                   <input type="checkbox" checked readOnly />
-                  <span>Shipping label</span>
+                  <span>Packing slip</span>
                 </label>
               </aside>
             </div>
@@ -3404,31 +3771,37 @@ export default function Index() {
 
         .generate-print-section {
           display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 24px;
+          flex-direction: column;
+          align-items: stretch;
+          gap: 12px;
           width: 100%;
-          flex-wrap: wrap;
         }
 
         .generate-print-info {
           display: flex;
-          flex-direction: column;
-          gap: 4px;
+          flex-direction: row;
+          align-items: baseline;
+          gap: 12px;
           min-width: 0;
-          flex: 1;
+          width: 100%;
         }
 
         .generate-print-heading {
+          flex-shrink: 0;
           font-size: 15px;
           font-weight: 600;
           line-height: 1.4;
+          white-space: nowrap;
         }
 
         .generate-print-description {
+          min-width: 0;
           font-size: 13px;
           line-height: 1.4;
           color: #6d7175;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
         }
 
 
@@ -3437,23 +3810,24 @@ export default function Index() {
         ========================================= */
 
         .print-actions {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 12px;
-          margin-left: auto;
-          flex-shrink: 0;
-          justify-content: flex-end;
+          display: grid;
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+          gap: 8px;
+          width: 100%;
+          min-width: 0;
         }
 
         .print-button {
-          height: 50px;
-          min-width: 220px;
+          height: 100%;
+          min-height: 50px;
+          min-width: 0;
+          width: 100%;
 
-          padding: 0 16px;
+          padding: 8px 10px;
 
           display: flex;
           align-items: center;
-          gap: 12px;
+          gap: 8px;
 
           border: 1px solid #c9c9c9;
           border-radius: 6px;
@@ -3496,13 +3870,13 @@ export default function Index() {
         .print-button-content strong {
           font-size: 13px;
           font-weight: 600;
-          white-space: nowrap;
+          line-height: 1.3;
         }
 
         .print-button-content span {
           font-size: 11px;
           color: #6d7175;
-          white-space: nowrap;
+          line-height: 1.3;
         }
 
 
@@ -3555,12 +3929,7 @@ export default function Index() {
           }
 
           .generate-print-section {
-            flex-direction: column;
             align-items: stretch;
-          }
-
-          .print-actions {
-            margin-left: 0;
           }
 
         }
@@ -3577,18 +3946,12 @@ export default function Index() {
             grid-column: auto;
           }
 
+          .generate-print-description {
+            white-space: normal;
+          }
+
           .print-actions {
-            flex-direction: column;
-            width: 100%;
-          }
-
-          .print-button {
-            width: 100%;
-            min-width: 0;
-          }
-
-          .generate-print-section {
-            gap: 16px;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
           }
 
         }

@@ -4,6 +4,12 @@ export type SalesChannelOption = {
   handle: string;
 };
 
+export const ONLINE_STORE_CHANNEL: SalesChannelOption = {
+  id: "online-store",
+  name: "Online Store",
+  handle: "online_store",
+};
+
 export const EXTRA_SALES_CHANNELS: SalesChannelOption[] = [
   {
     id: "recharge-subscriptions",
@@ -16,6 +22,30 @@ export const EXTRA_SALES_CHANNELS: SalesChannelOption[] = [
     handle: "beanz-connect",
   },
 ];
+
+function isOnlineStoreChannel(channel: SalesChannelOption) {
+  const name = normalizeChannelToken(channel.name);
+  const handle = normalizeChannelToken(channel.handle);
+
+  return (
+    channel.id === ONLINE_STORE_CHANNEL.id ||
+    name === "onlinestore" ||
+    handle === "onlinestore"
+  );
+}
+
+export function pickFilterSalesChannels(discovered: SalesChannelOption[]) {
+  const onlineStore = discovered.find(isOnlineStoreChannel);
+
+  return [
+    {
+      ...(onlineStore || ONLINE_STORE_CHANNEL),
+      name: ONLINE_STORE_CHANNEL.name,
+      handle: onlineStore?.handle || ONLINE_STORE_CHANNEL.handle,
+    },
+    ...EXTRA_SALES_CHANNELS,
+  ];
+}
 
 export const ORDER_STATUS_OPTIONS = [
   { value: "unfulfilled", label: "Unfulfilled" },
@@ -288,7 +318,8 @@ function normalizeChannelToken(value: string) {
 const SOURCE_NAME_ALIASES: Record<string, string[]> = {
   web: ["online store", "online_store", "shopify"],
   pos: ["point of sale", "point_of_sale", "pos"],
-  shopify_draft_order: ["draft orders", "draft order", "draft_orders"],
+  shopify_draft_order: ["online store", "online_store", "draft orders", "draft order"],
+  draft_order: ["online store", "online_store", "draft orders", "draft order"],
   iphone: ["shop", "shopify app", "buy button"],
   android: ["shop", "shopify app", "buy button"],
   subscription_contract: [
@@ -308,7 +339,37 @@ function titleCaseChannel(value: string) {
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
+function isDraftOrderChannel(order: any) {
+  const sourceName = String(order?.sourceName || "").toLowerCase();
+  const channelInfo = order?.channelInformation;
+  const definition = channelInfo?.channelDefinition;
+  const tokens = [
+    sourceName,
+    channelInfo?.displayName,
+    definition?.channelName,
+    definition?.subChannelName,
+    definition?.handle,
+    channelInfo?.app?.title,
+    order?.app?.name,
+  ].map((value) => normalizeChannelToken(String(value || "")));
+
+  return (
+    sourceName === "shopify_draft_order" ||
+    sourceName === "draft_order" ||
+    tokens.some(
+      (token) =>
+        token === "draftorder" ||
+        token === "draftorders" ||
+        token === "shopifydraftorder",
+    )
+  );
+}
+
 export function orderSalesChannelLabel(order: any) {
+  if (isDraftOrderChannel(order)) {
+    return ONLINE_STORE_CHANNEL.name;
+  }
+
   const channelInfo = order?.channelInformation;
   const definition = channelInfo?.channelDefinition;
   const sourceName = String(order?.sourceName || "").trim();
@@ -361,6 +422,20 @@ function orderChannelIdentity(order: any) {
   };
 }
 
+function isOnlineStoreOrder(order: any) {
+  const identity = orderChannelIdentity(order);
+
+  return (
+    isDraftOrderChannel(order) ||
+    identity.sourceName === "web" ||
+    identity.sourceName === "shopify_draft_order" ||
+    identity.sourceName === "draft_order" ||
+    identity.label === "onlinestore" ||
+    identity.handle === "onlinestore" ||
+    identity.definitionName === "onlinestore"
+  );
+}
+
 function isRechargeOrder(order: any) {
   const identity = orderChannelIdentity(order);
 
@@ -385,6 +460,10 @@ function isBeanzOrder(order: any) {
 }
 
 function orderMatchesOneChannel(order: any, channel: SalesChannelOption) {
+  if (isOnlineStoreChannel(channel)) {
+    return isOnlineStoreOrder(order);
+  }
+
   if (channel.id === "recharge-subscriptions") {
     return isRechargeOrder(order);
   }
@@ -403,18 +482,23 @@ function orderMatchesOneChannel(order: any, channel: SalesChannelOption) {
   );
 }
 
+function resolveSelectedChannels(
+  channels: SalesChannelOption[],
+  selectedIds: string[],
+) {
+  if (selectedAllChannels(channels, selectedIds)) {
+    return channels;
+  }
+
+  return channels.filter((channel) => selectedIds.includes(channel.id));
+}
+
 function orderMatchesChannels(
   order: any,
   channels: SalesChannelOption[],
   selectedIds: string[],
 ) {
-  if (selectedAllChannels(channels, selectedIds)) {
-    return true;
-  }
-
-  const selected = channels.filter((channel) =>
-    selectedIds.includes(channel.id),
-  );
+  const selected = resolveSelectedChannels(channels, selectedIds);
 
   if (selected.length === 0) {
     return false;
@@ -440,14 +524,8 @@ export function buildSalesChannelQuery(
   channels: SalesChannelOption[],
   selectedIds: string[],
 ) {
-  if (selectedAllChannels(channels, selectedIds)) {
-    return "";
-  }
-
-  const selected = new Set(selectedIds.filter((id) => id !== "all"));
-  const terms = channels
-    .filter((channel) => selected.has(channel.id))
-    .flatMap((channel) => {
+  const terms = resolveSelectedChannels(channels, selectedIds).flatMap(
+    (channel) => {
       const channelTerms: string[] = [];
 
       if (channel.handle) {
@@ -458,8 +536,13 @@ export function buildSalesChannelQuery(
         channelTerms.push(`sales_channel:${quoteQueryValue(channel.name)}`);
       }
 
-      if (channel.id) {
+      if (/^\d+$/.test(channel.id)) {
         channelTerms.push(`channel_id:${channel.id}`);
+      }
+
+      if (isOnlineStoreChannel(channel)) {
+        channelTerms.push("source_name:web");
+        channelTerms.push("source_name:shopify_draft_order");
       }
 
       return channelTerms.length > 0 ? [joinOr(channelTerms)] : [];

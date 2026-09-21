@@ -1,12 +1,12 @@
 import { orderSalesChannelLabel } from "./order-filters";
+import {
+  customCoffeeSort,
+  parseCoffeePackSize,
+  type MachineOrGrinderKind,
+  type TallyItem,
+} from "./tally";
 
-export type TallyItem = {
-  sku: string;
-  name: string;
-  variant?: string;
-  salesChannel: string;
-  quantity: number;
-};
+export type { TallyItem } from "./tally";
 
 type LineItemNode = {
   title?: string | null;
@@ -15,8 +15,17 @@ type LineItemNode = {
   currentQuantity?: number | null;
   sku?: string | null;
   variantTitle?: string | null;
+  variant?: {
+    selectedOptions?: Array<{
+      name?: string | null;
+      value?: string | null;
+    } | null> | null;
+  } | null;
   product?: {
     productType?: string | null;
+    templateSuffix?: string | null;
+    tags?: string[] | null;
+    vendor?: string | null;
   } | null;
 };
 
@@ -42,8 +51,13 @@ type GroupedCount = {
   count: number;
   sku: string;
   name: string;
+  vendor: string;
   variants: string[];
   salesChannel: string;
+  bagCount: number;
+  unitGrams: number;
+  sizeLabel: string;
+  kind?: MachineOrGrinderKind;
 };
 
 const GROUP_ORDER = [
@@ -77,50 +91,75 @@ const COFFEE_TITLE_PATTERNS = [
   / Auto renew/i,
 ];
 
-function customCoffeeSort(a: { title: string }, b: { title: string }) {
-  const getProductName = (title: string) =>
-    title.split(/[-\s]/, 1)[0].toUpperCase();
+const MACHINE_TAGS = new Set(
+  [
+    "Coffee machine",
+    "coffee machine",
+    "COFFEE MACHINE",
+    "Home Coffee Machines",
+    "home coffee machines",
+    "HOME COFFEE MACHINES",
+  ].map((tag) => tag.toLowerCase()),
+);
 
-  const nameA = getProductName(a.title);
-  const nameB = getProductName(b.title);
+const GRINDER_TAGS = new Set(
+  [
+    "Home Coffee Grinders",
+    "home coffee grinders",
+    "HOME COFFEE GRINDERS",
+  ].map((tag) => tag.toLowerCase()),
+);
 
-  const namePriority: Record<string, number> = {
-    CHAMPION: 1,
-    THE: 2,
-    DELICATE: 3,
-    PLACEBO: 4,
-    SINGLE: 5,
-  };
+function productTagSet(tags: string[] | null | undefined) {
+  return new Set(
+    (tags ?? []).map((tag) => tag.trim().toLowerCase()).filter(Boolean),
+  );
+}
 
-  const priorityA = namePriority[nameA] || 100;
-  const priorityB = namePriority[nameB] || 100;
+function hasAnyProductTag(
+  tags: string[] | null | undefined,
+  accepted: Set<string>,
+) {
+  const productTags = productTagSet(tags);
 
-  if (priorityA !== priorityB) {
-    return priorityA - priorityB;
+  for (const tag of productTags) {
+    if (accepted.has(tag)) return true;
   }
 
-  if (priorityA === 100 && a.title !== b.title) {
-    return a.title.localeCompare(b.title);
+  return false;
+}
+
+function machineOrGrinderKind(
+  product?: LineItemNode["product"],
+): MachineOrGrinderKind | null {
+  const suffix = product?.templateSuffix?.trim().toLowerCase() ?? "";
+
+  if (suffix === "coffe-machine" || suffix === "coffee-machine") {
+    return "machine";
   }
 
-  const extractWeightValue = (title: string) => {
-    const match = title.match(/(\d+)(g|kg)/i);
-    if (match) {
-      const value = parseInt(match[1], 10);
-      const unit = match[2].toLowerCase();
-      return unit === "kg" ? value * 1000 : value;
-    }
-    return 99999;
-  };
-
-  const weightA = extractWeightValue(a.title);
-  const weightB = extractWeightValue(b.title);
-
-  if (weightA !== weightB) {
-    return weightA - weightB;
+  if (suffix === "grinder") {
+    return "grinder";
   }
 
-  return a.title.localeCompare(b.title);
+  if (hasAnyProductTag(product?.tags, GRINDER_TAGS)) {
+    return "grinder";
+  }
+
+  if (hasAnyProductTag(product?.tags, MACHINE_TAGS)) {
+    return "machine";
+  }
+
+  return null;
+}
+
+function coffeeSizeOptionValue(item: LineItemNode) {
+  const options = item.variant?.selectedOptions ?? [];
+  const sizeOption = options.find(
+    (option) => option?.name?.trim().toLowerCase() === "size",
+  );
+
+  return sizeOption?.value?.trim() || "";
 }
 
 function variantLabel(variantTitle: string) {
@@ -140,6 +179,11 @@ function addToGroup(
   sku: string,
   variantTitle: string,
   salesChannel: string,
+  bagCount: number,
+  unitGrams: number,
+  sizeLabel: string,
+  kind?: MachineOrGrinderKind,
+  vendor = "",
 ) {
   const groupItemKey = `${displayTitle}\u0001${salesChannel}`;
   const existing = groupedTally[groupKey][groupItemKey];
@@ -147,8 +191,12 @@ function addToGroup(
 
   if (existing) {
     existing.count += quantity;
+    existing.bagCount += bagCount;
     if (variant && !existing.variants.includes(variant)) {
       existing.variants.push(variant);
+    }
+    if (!existing.vendor && vendor) {
+      existing.vendor = vendor;
     }
     return;
   }
@@ -157,29 +205,48 @@ function addToGroup(
     count: quantity,
     sku,
     name,
+    vendor,
     variants: variant ? [variant] : [],
     salesChannel,
+    bagCount,
+    unitGrams,
+    sizeLabel,
+    kind,
   };
 }
 
-function toTallyItem(row: {
-  sku: string;
-  name: string;
-  count: number;
-  variants: string[];
-  salesChannel: string;
-}): TallyItem {
+function toTallyItem(row: GroupedCount): TallyItem {
   return {
     sku: row.sku,
     name: row.name,
     variant: row.variants.join(", "),
+    vendor: row.vendor,
     salesChannel: row.salesChannel,
     quantity: row.count,
+    bagCount: row.bagCount,
+    unitGrams: row.unitGrams,
+    sizeLabel: row.sizeLabel,
+    kind: row.kind,
   };
+}
+
+function sortGroupedProducts(
+  products: Array<{ title: string } & GroupedCount>,
+) {
+  products.sort((a, b) => {
+    const titleComparison = a.title.localeCompare(b.title);
+    if (titleComparison !== 0) {
+      return titleComparison;
+    }
+    return b.count - a.count;
+  });
+
+  return products.map((row) => toTallyItem(row));
 }
 
 export function tallyOrders(orders: OrderNode[]): {
   coffeeProducts: TallyItem[];
+  machinesAndGrinders: TallyItem[];
   accessories: TallyItem[];
 } {
   const groupedTally: Record<string, Record<string, GroupedCount>> = {};
@@ -196,6 +263,7 @@ export function tallyOrders(orders: OrderNode[]): {
     for (const item of lineItems) {
       if (!item) continue;
 
+      const equipmentKind = machineOrGrinderKind(item.product);
       const productType = item.product?.productType
         ? item.product.productType.toLowerCase()
         : "";
@@ -208,13 +276,17 @@ export function tallyOrders(orders: OrderNode[]): {
         baseTitle.toLowerCase() === "tip" ||
         productType === "beverage" ||
         !item.product ||
-        !productType
+        (!productType && !equipmentKind)
       ) {
         continue;
       }
-
-      const groupKey = TYPE_TO_GROUP[productType] || "Everything Else";
+      const groupKey = equipmentKind
+        ? "Coffee Machines and Grinders"
+        : TYPE_TO_GROUP[productType] || "Everything Else";
       let displayTitle = baseTitle;
+      let bagCount = quantity;
+      let unitGrams = 0;
+      let sizeLabel = "";
 
       if (groupKey === "Coffees") {
         let numericSize = 0;
@@ -224,8 +296,13 @@ export function tallyOrders(orders: OrderNode[]): {
           baseTitle = baseTitle.replace(pattern, "").trim();
         }
 
-        if (variantTitle) {
-          sizeVariant = variantTitle.split(/[ /]/, 1)[0].trim().toLowerCase();
+        const sizeOptionValue = coffeeSizeOptionValue(item);
+        const packSize = parseCoffeePackSize(sizeOptionValue);
+        unitGrams = packSize?.grams ?? 0;
+        sizeLabel = packSize?.label ?? sizeOptionValue;
+
+        if (sizeOptionValue) {
+          sizeVariant = sizeOptionValue.split(/[ /]/, 1)[0].trim().toLowerCase();
 
           const sizeMatch = sizeVariant.match(/^(\d+)kg$/);
           if (sizeMatch) {
@@ -266,6 +343,11 @@ export function tallyOrders(orders: OrderNode[]): {
           sku,
           variantTitle,
           salesChannel,
+          bagCount,
+          unitGrams,
+          sizeLabel,
+          equipmentKind ?? undefined,
+          item.product?.vendor?.trim() || "",
         );
       }
     }
@@ -279,7 +361,33 @@ export function tallyOrders(orders: OrderNode[]): {
     .sort(customCoffeeSort)
     .map((row) => toTallyItem(row));
 
-  const accessories = GROUP_ORDER.filter((group) => group !== "Coffees")
+  const machineGroupRows = Object.entries(
+    groupedTally["Coffee Machines and Grinders"],
+  ).map(([key, data]) => ({
+    title: key.split("\u0001")[0],
+    ...data,
+  }));
+
+  const machinesAndGrinders = machineGroupRows
+    .filter((row) => row.kind)
+    .sort((a, b) => {
+      const kindOrder = { machine: 0, grinder: 1 };
+      const kindA = a.kind ? kindOrder[a.kind] : 2;
+      const kindB = b.kind ? kindOrder[b.kind] : 2;
+      if (kindA !== kindB) return kindA - kindB;
+      const vendorComparison = (a.vendor || "").localeCompare(b.vendor || "");
+      if (vendorComparison !== 0) return vendorComparison;
+      return a.title.localeCompare(b.title) || b.count - a.count;
+    })
+    .map((row) => toTallyItem(row));
+
+  const leftoverEquipment = sortGroupedProducts(
+    machineGroupRows.filter((row) => !row.kind),
+  );
+
+  const accessories = GROUP_ORDER.filter(
+    (group) => group !== "Coffees" && group !== "Coffee Machines and Grinders",
+  )
     .flatMap((groupName) => {
       const products = Object.entries(groupedTally[groupName]).map(
         ([key, data]) => ({
@@ -288,19 +396,13 @@ export function tallyOrders(orders: OrderNode[]): {
         }),
       );
 
-      products.sort((a, b) => {
-        const titleComparison = a.title.localeCompare(b.title);
-        if (titleComparison !== 0) {
-          return titleComparison;
-        }
-        return b.count - a.count;
-      });
-
-      return products.map((row) => toTallyItem(row));
-    });
+      return sortGroupedProducts(products);
+    })
+    .concat(leftoverEquipment);
 
   return {
     coffeeProducts,
+    machinesAndGrinders,
     accessories,
   };
 }

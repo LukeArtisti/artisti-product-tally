@@ -4,6 +4,7 @@ import {
   hasPickupDeliveryMethod,
   orderSalesChannelLabel,
   orderStatusLabel,
+  pickFilterSalesChannels,
   type OrderStatusValue,
   type SalesChannelOption,
 } from "./order-filters";
@@ -446,13 +447,15 @@ export async function fetchSalesChannels(
       ? await fetchProductPublicationChannels(admin)
       : [];
 
-  return mergeSalesChannels([
-    allPublications,
-    appPublications,
-    definitions,
-    productPublications,
-    EXTRA_SALES_CHANNELS,
-  ]);
+  return pickFilterSalesChannels(
+    mergeSalesChannels([
+      allPublications,
+      appPublications,
+      definitions,
+      productPublications,
+      EXTRA_SALES_CHANNELS,
+    ]),
+  );
 }
 
 export async function fetchAllOrders(
@@ -498,8 +501,17 @@ export async function fetchAllOrders(
                   unfulfilledQuantity
                   sku
                   variantTitle
+                  variant {
+                    selectedOptions {
+                      name
+                      value
+                    }
+                  }
                   product {
                     productType
+                    templateSuffix
+                    tags
+                    vendor
                   }
                 }
                 pageInfo {
