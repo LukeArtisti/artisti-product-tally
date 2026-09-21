@@ -789,15 +789,11 @@ function grindSummaryPrintHtml(summaries: CoffeeGrindSummary[]) {
   if (summaries.length === 0) return "";
 
   const bodyRows = summaries
-    .flatMap((summary) =>
-      summary.sizes.map(
-        (line) => `<tr>
+    .map(
+      (summary) => `<tr>
         <td>${escapeHtml(summary.name)}</td>
-        <td>${escapeHtml(line.sizeLabel)}</td>
-        <td class="num">${line.bags}</td>
-        <td class="num">${escapeHtml(formatCoffeeWeight(line.grams))}</td>
+        <td class="num">${escapeHtml(formatCoffeeWeight(summary.totalGrams))}</td>
       </tr>`,
-      ),
     )
     .join("");
 
@@ -809,14 +805,12 @@ function grindSummaryPrintHtml(summaries: CoffeeGrindSummary[]) {
         <thead>
           <tr>
             <th>Coffee</th>
-            <th>Size</th>
-            <th>Bags</th>
             <th>Weight</th>
           </tr>
         </thead>
         <tbody>${bodyRows}
           <tr class="grind-product-total">
-            <td colspan="3"><strong>Total coffee to grind</strong></td>
+            <td><strong>Total coffee to grind</strong></td>
             <td class="num"><strong>${escapeHtml(formatCoffeeWeight(grandTotal))}</strong></td>
           </tr>
         </tbody>
@@ -848,7 +842,7 @@ function buildPackingSheetPrintHtml(title: string, rangeText: string, sheets: Pa
       <h1>${escapeHtml(sheet.heading)}</h1>
       ${sheet.subheading ? `<h2>${escapeHtml(sheet.subheading)}</h2>` : ""}
       ${sheet.grindSummary ? grindSummaryPrintHtml(sheet.grindSummary) : ""}
-      <table>
+      <table class="products">
         <thead><tr>${headerCells}</tr></thead>
         <tbody>${bodyRows}</tbody>
       </table>
@@ -876,7 +870,7 @@ function buildPackingSheetPrintHtml(title: string, rangeText: string, sheets: Pa
         line-height: 1.4;
       }
       .sheet {
-        max-width: 760px;
+        width: 100%;
         margin: 0 auto 24px;
         padding: 24px 28px 16px;
         page-break-after: always;
@@ -898,8 +892,11 @@ function buildPackingSheetPrintHtml(title: string, rangeText: string, sheets: Pa
       }
       table {
         border-collapse: collapse;
-        width: auto;
-        max-width: 100%;
+        width: 100%;
+      }
+      table.products th,
+      table.products td {
+        white-space: normal;
       }
       th, td {
         padding: 6px 18px 6px 0;
@@ -932,7 +929,7 @@ function buildPackingSheetPrintHtml(title: string, rangeText: string, sheets: Pa
         font-size: 14px;
       }
       @media print {
-        .sheet { max-width: none; margin: 0; padding: 0; }
+        .sheet { margin: 0; padding: 0; }
       }
     </style>
   </head>
@@ -996,7 +993,7 @@ function buildShippingLabelPrintHtml(
         line-height: 1.4;
       }
       .slip {
-        max-width: 760px;
+        width: 100%;
         margin: 0 auto 24px;
         padding: 24px 28px 16px;
         page-break-after: always;
