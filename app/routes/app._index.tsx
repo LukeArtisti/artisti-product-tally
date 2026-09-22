@@ -2024,85 +2024,6 @@ export default function Index() {
                     </div>
 
 
-                    {/* MACHINES AND GRINDERS */}
-                    <div className="preview-card">
-
-                      <div className="preview-header">
-
-                        <strong>
-                          Coffee Machines and Grinders Preview
-                        </strong>
-
-                        <span>
-                          {totalMachineItems} items
-                        </span>
-
-                      </div>
-
-                      <div className="preview-table-wrap">
-                        <table>
-
-                          <thead>
-                            <tr>
-                              <th>SKU</th>
-                              <th>Brand</th>
-                              <th>Item Name</th>
-                              <th>Sales Channel</th>
-                              <th>Quantity</th>
-                            </tr>
-                          </thead>
-
-                          <tbody>
-                            {isGenerating ? (
-                              <tr>
-                                <td colSpan={5} className="preview-empty">
-                                  Loading machines and grinders from orders...
-                                </td>
-                              </tr>
-                            ) : machinesAndGrinders.length === 0 ? (
-                              <tr>
-                                <td colSpan={5} className="preview-empty">
-                                  {fetcher.data?.success
-                                    ? "No coffee machines or grinders in this order range."
-                                    : "Generate a product tally to preview machines and grinders."}
-                                </td>
-                              </tr>
-                            ) : (
-                              machinesAndGrinders.map((item) => (
-                                <tr
-                                  key={`${item.sku}-${item.name}-${item.variant}-${item.salesChannel}-${item.kind}`}
-                                >
-                                  <td>{item.sku || "—"}</td>
-                                  <td>{item.vendor || "—"}</td>
-                                  <td>
-                                    {item.name}
-                                    {item.variant ? ` – ${item.variant}` : ""}
-                                  </td>
-                                  <td>{item.salesChannel}</td>
-                                  <td>{item.quantity}</td>
-                                </tr>
-                              ))
-                            )}
-                          </tbody>
-
-                        </table>
-                      </div>
-
-                      <div className="preview-total">
-
-                        <strong>
-                          Total Machine and Grinder Items
-                        </strong>
-
-                        <strong>
-                          {totalMachineItems}
-                        </strong>
-
-                      </div>
-
-                    </div>
-
-
                     {/* ACCESSORIES */}
                     <div className="preview-card">
 
@@ -2175,6 +2096,85 @@ export default function Index() {
 
                         <strong>
                           {totalAccessoryItems}
+                        </strong>
+
+                      </div>
+
+                    </div>
+
+
+                    {/* MACHINES AND GRINDERS */}
+                    <div className="preview-card">
+
+                      <div className="preview-header">
+
+                        <strong>
+                          Coffee Machines and Grinders Preview
+                        </strong>
+
+                        <span>
+                          {totalMachineItems} items
+                        </span>
+
+                      </div>
+
+                      <div className="preview-table-wrap">
+                        <table>
+
+                          <thead>
+                            <tr>
+                              <th>SKU</th>
+                              <th>Brand</th>
+                              <th>Item Name</th>
+                              <th>Sales Channel</th>
+                              <th>Quantity</th>
+                            </tr>
+                          </thead>
+
+                          <tbody>
+                            {isGenerating ? (
+                              <tr>
+                                <td colSpan={5} className="preview-empty">
+                                  Loading machines and grinders from orders...
+                                </td>
+                              </tr>
+                            ) : machinesAndGrinders.length === 0 ? (
+                              <tr>
+                                <td colSpan={5} className="preview-empty">
+                                  {fetcher.data?.success
+                                    ? "No coffee machines or grinders in this order range."
+                                    : "Generate a product tally to preview machines and grinders."}
+                                </td>
+                              </tr>
+                            ) : (
+                              machinesAndGrinders.map((item) => (
+                                <tr
+                                  key={`${item.sku}-${item.name}-${item.variant}-${item.salesChannel}-${item.kind}`}
+                                >
+                                  <td>{item.sku || "—"}</td>
+                                  <td>{item.vendor || "—"}</td>
+                                  <td>
+                                    {item.name}
+                                    {item.variant ? ` – ${item.variant}` : ""}
+                                  </td>
+                                  <td>{item.salesChannel}</td>
+                                  <td>{item.quantity}</td>
+                                </tr>
+                              ))
+                            )}
+                          </tbody>
+
+                        </table>
+                      </div>
+
+                      <div className="preview-total">
+
+                        <strong>
+                          Total Machine and Grinder Items
+                        </strong>
+
+                        <strong>
+                          {totalMachineItems}
                         </strong>
 
                       </div>
