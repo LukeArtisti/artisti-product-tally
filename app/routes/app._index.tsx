@@ -34,6 +34,7 @@ import type {
 } from "../shipping-label";
 import { tallyOrders } from "../tally.server";
 import {
+  customCoffeeSort,
   formatCoffeeWeight,
   summarizeCoffeeToGrind,
   type CoffeeGrindSummary,
@@ -684,6 +685,8 @@ function shippingSlipInnerHtml(
           </td>
           <td class="sku-cell">${escapeHtml(item.sku)}x</td>
           <td class="qty-cell">${escapeHtml(String(item.quantity))} x</td>
+          <td class="check-cell"><span class="tick-box"></span></td>
+          <td class="check-cell"><span class="tick-box"></span></td>
           <td class="item-cell"><b>${escapeHtml(item.name)}</b></td>
         </tr>`,
     )
@@ -694,6 +697,8 @@ function shippingSlipInnerHtml(
         <td class="image-cell"></td>
         <td class="sku-cell">Yes</td>
         <td class="qty-cell"></td>
+        <td class="check-cell"><span class="tick-box"></span></td>
+        <td class="check-cell"><span class="tick-box"></span></td>
         <td class="item-cell"><b>Gift Wrapped</b></td>
       </tr>`
     : "";
@@ -744,6 +749,8 @@ function shippingSlipInnerHtml(
         <col class="col-image" />
         <col class="col-sku" />
         <col class="col-qty" />
+        <col class="col-picked" />
+        <col class="col-check" />
         <col class="col-item" />
       </colgroup>
       <thead>
@@ -751,6 +758,8 @@ function shippingSlipInnerHtml(
           <th class="image-cell"></th>
           <th class="sku-cell">item sku</th>
           <th class="qty-cell">Quantity</th>
+          <th class="check-cell">Picked</th>
+          <th class="check-cell">Check</th>
           <th class="item-cell">Item</th>
         </tr>
       </thead>
@@ -821,8 +830,20 @@ function grindSummaryPrintHtml(summaries: CoffeeGrindSummary[]) {
 function buildPackingSheetPrintHtml(title: string, rangeText: string, sheets: PackingPrintSheet[]) {
   const pages = sheets
     .map((sheet) => {
+      const numericColumns = new Set<number>();
+
+      for (const row of sheet.rows) {
+        row.forEach((cell, index) => {
+          if (typeof cell === "number") numericColumns.add(index);
+        });
+      }
+
       const headerCells = sheet.headers
-        .map((header) => `<th>${escapeHtml(header)}</th>`)
+        .map((header, index) => {
+          const numeric =
+            numericColumns.has(index) || index === sheet.headers.length - 1;
+          return `<th${numeric ? ' class="num"' : ""}>${escapeHtml(header)}</th>`;
+        })
         .join("");
       const bodyRows = sheet.rows
         .map(
@@ -905,8 +926,10 @@ function buildPackingSheetPrintHtml(title: string, rangeText: string, sheets: Pa
         white-space: nowrap;
         border-bottom: 1px solid #ddd;
       }
-      th:last-child, td:last-child, td.num {
+      th.num, td.num {
         text-align: right;
+      }
+      th:last-child, td:last-child {
         padding-right: 0;
       }
       h3 {
@@ -1019,10 +1042,19 @@ function buildShippingLabelPrintHtml(
         table-layout: fixed;
         margin: 0 0 1.5em;
       }
-      .col-image { width: 120px; }
+      .col-image { width: 84px; }
       .col-sku { width: 28%; }
-      .col-qty { width: 18%; }
+      .col-qty { width: 12%; }
+      .col-picked, .col-check { width: 52px; }
       .col-item { width: auto; }
+      .item-table .check-cell { text-align: center; }
+      .tick-box {
+        display: inline-block;
+        width: 16px;
+        height: 16px;
+        border: 1.5px solid #111;
+        vertical-align: middle;
+      }
       .item-table th,
       .item-table td {
         border: none;
@@ -1047,12 +1079,12 @@ function buildShippingLabelPrintHtml(
         padding: 12px;
       }
       .item-image {
-        width: 100px;
-        height: 100px;
+        width: 70px;
+        height: 70px;
       }
       .item-image img {
-        width: 100px;
-        height: 100px;
+        width: 70px;
+        height: 70px;
         object-fit: contain;
         display: block;
       }
@@ -1523,58 +1555,93 @@ export default function Index() {
   const printCoffeeSheets = () => {
     if (coffeeProducts.length === 0) return;
 
-    const byChannel = new Map<string, typeof coffeeProducts>();
+    type CoffeeChannelRow = {
+      name: string;
+      variant: string;
+      recharge: number;
+      onlineStore: number;
+      beanz: number;
+      other: number;
+    };
+
+    const channelBucket = (salesChannel: string) => {
+      const token = salesChannel.toLowerCase().replace(/[^a-z0-9]+/g, "");
+
+      if (token.includes("recharge") || token.includes("subscription")) {
+        return "recharge" as const;
+      }
+
+      if (token.includes("beanz")) {
+        return "beanz" as const;
+      }
+
+      if (
+        token.includes("onlinestore") ||
+        token.includes("draftorder") ||
+        token === "web"
+      ) {
+        return "onlineStore" as const;
+      }
+
+      return "other" as const;
+    };
+
+    const combinedByProduct = new Map<string, CoffeeChannelRow>();
 
     for (const item of coffeeProducts) {
-      const channel = item.salesChannel?.trim() || "Unknown";
-      const group = byChannel.get(channel);
+      const variant = item.variant || "";
+      const key = `${item.name}\u0001${variant}`;
+      const existing = combinedByProduct.get(key) ?? {
+        name: item.name,
+        variant,
+        recharge: 0,
+        onlineStore: 0,
+        beanz: 0,
+        other: 0,
+      };
+      const bucket = channelBucket(item.salesChannel || "");
 
-      if (group) {
-        group.push(item);
-      } else {
-        byChannel.set(channel, [item]);
-      }
+      existing[bucket] += item.quantity;
+      combinedByProduct.set(key, existing);
     }
 
-    const toCoffeeSheet = (subheading: string, items: typeof coffeeProducts) => ({
-      heading: "Bean Packing Team Copy",
-      subheading,
-      headers: ["SKU", "Product Name", "Variant", "Quantity"],
-      rows: items.map((item) => [
-        item.sku || "",
-        item.name,
-        item.variant || "",
-        item.quantity,
-      ]),
-      totalLabel: "Total Coffee Items",
-      totalValue: items.reduce((sum, item) => sum + item.quantity, 0),
-      grindSummary: summarizeCoffeeToGrind(items),
-    });
-
-    const combinedItems = [...byChannel.values()].flat();
-    const combinedByProduct = new Map<string, (typeof coffeeProducts)[number]>();
-
-    for (const item of combinedItems) {
-      const key = `${item.sku}\u0001${item.name}\u0001${item.variant || ""}`;
-      const existing = combinedByProduct.get(key);
-
-      if (existing) {
-        existing.quantity += item.quantity;
-        existing.bagCount = (existing.bagCount ?? 0) + (item.bagCount ?? 0);
-      } else {
-        combinedByProduct.set(key, { ...item });
-      }
-    }
-
-    const sheets = [
-      ...[...byChannel.entries()].map(([channel, items]) =>
-        toCoffeeSheet(channel, items),
+    const rows = [...combinedByProduct.values()].sort((a, b) =>
+      customCoffeeSort(
+        { title: a.variant ? `${a.name} - ${a.variant}` : a.name },
+        { title: b.variant ? `${b.name} - ${b.variant}` : b.name },
       ),
-      toCoffeeSheet("All sales channels", [...combinedByProduct.values()]),
-    ];
+    );
+
+    const grandTotal = rows.reduce(
+      (sum, row) => sum + row.recharge + row.onlineStore + row.beanz + row.other,
+      0,
+    );
 
     printHtmlDocument(
-      buildPackingSheetPrintHtml("Bean Packing Team Copy", packingRangeText, sheets),
+      buildPackingSheetPrintHtml("Bean Packing Team Copy", packingRangeText, [
+        {
+          heading: "Bean Packing Team Copy",
+          headers: [
+            "Product Name",
+            "Variant",
+            "Recharge",
+            "Online Store",
+            "Beanz Connect",
+            "Total Quantity",
+          ],
+          rows: rows.map((row) => [
+            row.name,
+            row.variant,
+            row.recharge,
+            row.onlineStore,
+            row.beanz,
+            row.recharge + row.onlineStore + row.beanz + row.other,
+          ]),
+          totalLabel: "Total Coffee Items",
+          totalValue: grandTotal,
+          grindSummary: summarizeCoffeeToGrind(coffeeProducts),
+        },
+      ]),
     );
   };
 
@@ -1972,6 +2039,7 @@ export default function Index() {
                               <th>Product Name</th>
                               <th>Variant</th>
                               <th>Sales Channel</th>
+                              <th>Status</th>
                               <th>Quantity</th>
                             </tr>
                           </thead>
@@ -1979,13 +2047,13 @@ export default function Index() {
                           <tbody>
                             {isGenerating ? (
                               <tr>
-                                <td colSpan={5} className="preview-empty">
+                                <td colSpan={6} className="preview-empty">
                                   Loading coffee products from orders...
                                 </td>
                               </tr>
                             ) : coffeeProducts.length === 0 ? (
                               <tr>
-                                <td colSpan={5} className="preview-empty">
+                                <td colSpan={6} className="preview-empty">
                                   {fetcher.data?.success
                                     ? "No coffee products in this order range."
                                     : "Generate a product tally to preview coffee items."}
@@ -1994,12 +2062,13 @@ export default function Index() {
                             ) : (
                               coffeeProducts.map((item) => (
                                 <tr
-                                  key={`${item.sku}-${item.name}-${item.variant}-${item.salesChannel}`}
+                                  key={`${item.sku}-${item.name}-${item.variant}-${item.salesChannel}-${item.fulfillmentStatus}`}
                                 >
                                   <td>{item.sku || "—"}</td>
                                   <td>{item.name}</td>
                                   <td>{item.variant}</td>
                                   <td>{item.salesChannel}</td>
+                                  <td>{item.fulfillmentStatus}</td>
                                   <td>{item.quantity}</td>
                                 </tr>
                               ))
@@ -2047,6 +2116,7 @@ export default function Index() {
                               <th>SKU</th>
                               <th>Item Name</th>
                               <th>Sales Channel</th>
+                              <th>Status</th>
                               <th>Quantity</th>
                             </tr>
                           </thead>
@@ -2055,13 +2125,13 @@ export default function Index() {
 
                             {isGenerating ? (
                               <tr>
-                                <td colSpan={4} className="preview-empty">
+                                <td colSpan={5} className="preview-empty">
                                   Loading accessories from orders...
                                 </td>
                               </tr>
                             ) : accessories.length === 0 ? (
                               <tr>
-                                <td colSpan={4} className="preview-empty">
+                                <td colSpan={5} className="preview-empty">
                                   {fetcher.data?.success
                                     ? "No accessories in this order range."
                                     : "Generate a product tally to preview accessories."}
@@ -2070,7 +2140,7 @@ export default function Index() {
                             ) : (
                               accessories.map((item) => (
                                 <tr
-                                  key={`${item.sku}-${item.name}-${item.variant}-${item.salesChannel}`}
+                                  key={`${item.sku}-${item.name}-${item.variant}-${item.salesChannel}-${item.fulfillmentStatus}`}
                                 >
                                   <td>{item.sku || "—"}</td>
                                   <td>
@@ -2078,6 +2148,7 @@ export default function Index() {
                                     {item.variant ? ` – ${item.variant}` : ""}
                                   </td>
                                   <td>{item.salesChannel}</td>
+                                  <td>{item.fulfillmentStatus}</td>
                                   <td>{item.quantity}</td>
                                 </tr>
                               ))
@@ -2127,6 +2198,7 @@ export default function Index() {
                               <th>Brand</th>
                               <th>Item Name</th>
                               <th>Sales Channel</th>
+                              <th>Status</th>
                               <th>Quantity</th>
                             </tr>
                           </thead>
@@ -2134,13 +2206,13 @@ export default function Index() {
                           <tbody>
                             {isGenerating ? (
                               <tr>
-                                <td colSpan={5} className="preview-empty">
+                                <td colSpan={6} className="preview-empty">
                                   Loading machines and grinders from orders...
                                 </td>
                               </tr>
                             ) : machinesAndGrinders.length === 0 ? (
                               <tr>
-                                <td colSpan={5} className="preview-empty">
+                                <td colSpan={6} className="preview-empty">
                                   {fetcher.data?.success
                                     ? "No coffee machines or grinders in this order range."
                                     : "Generate a product tally to preview machines and grinders."}
@@ -2149,7 +2221,7 @@ export default function Index() {
                             ) : (
                               machinesAndGrinders.map((item) => (
                                 <tr
-                                  key={`${item.sku}-${item.name}-${item.variant}-${item.salesChannel}-${item.kind}`}
+                                  key={`${item.sku}-${item.name}-${item.variant}-${item.salesChannel}-${item.kind}-${item.fulfillmentStatus}`}
                                 >
                                   <td>{item.sku || "—"}</td>
                                   <td>{item.vendor || "—"}</td>
@@ -2158,6 +2230,7 @@ export default function Index() {
                                     {item.variant ? ` – ${item.variant}` : ""}
                                   </td>
                                   <td>{item.salesChannel}</td>
+                                  <td>{item.fulfillmentStatus}</td>
                                   <td>{item.quantity}</td>
                                 </tr>
                               ))
@@ -2237,7 +2310,7 @@ export default function Index() {
                         </strong>
 
                         <span>
-                          Coffee products, one page per sales channel plus all channels combined
+                          Coffee products, with Recharge, Online Store, and Beanz Connect quantities
                         </span>
 
                       </span>
@@ -3507,7 +3580,7 @@ export default function Index() {
         }
 
         .shipping-slip .col-image {
-          width: 120px;
+          width: 84px;
         }
 
         .shipping-slip .col-sku {
@@ -3515,7 +3588,24 @@ export default function Index() {
         }
 
         .shipping-slip .col-qty {
-          width: 18%;
+          width: 12%;
+        }
+
+        .shipping-slip .col-picked,
+        .shipping-slip .col-check {
+          width: 52px;
+        }
+
+        .shipping-slip .item-table .check-cell {
+          text-align: center;
+        }
+
+        .shipping-slip .tick-box {
+          display: inline-block;
+          width: 16px;
+          height: 16px;
+          border: 1.5px solid #111;
+          vertical-align: middle;
         }
 
         .shipping-slip .item-table th,
@@ -3547,13 +3637,13 @@ export default function Index() {
         }
 
         .shipping-slip .item-image {
-          width: 100px;
-          height: 100px;
+          width: 70px;
+          height: 70px;
         }
 
         .shipping-slip .item-image img {
-          width: 100px;
-          height: 100px;
+          width: 70px;
+          height: 70px;
           object-fit: contain;
           display: block;
         }

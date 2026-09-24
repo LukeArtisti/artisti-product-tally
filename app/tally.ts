@@ -6,6 +6,7 @@ export type TallyItem = {
   variant?: string;
   vendor?: string;
   salesChannel: string;
+  fulfillmentStatus?: string;
   quantity: number;
   bagCount?: number;
   unitGrams?: number;

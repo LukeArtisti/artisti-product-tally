@@ -231,6 +231,119 @@ function orderIsOnHold(order: any) {
   return normalizeStatus(order?.displayFulfillmentStatus) === "ON_HOLD";
 }
 
+export type LineFulfillmentStatus = "On hold" | "Unfulfilled";
+
+export function orderLineFulfillmentStatus(order: any): LineFulfillmentStatus {
+  return orderIsOnHold(order) ? "On hold" : "Unfulfilled";
+}
+
+function fulfillmentOrderStatus(
+  status: string,
+): LineFulfillmentStatus | null {
+  const normalized = String(status || "").toUpperCase();
+
+  if (normalized === "ON_HOLD") return "On hold";
+
+  if (
+    normalized === "OPEN" ||
+    normalized === "IN_PROGRESS" ||
+    normalized === "SCHEDULED" ||
+    normalized === "INCOMPLETE"
+  ) {
+    return "Unfulfilled";
+  }
+
+  return null;
+}
+
+export function lineFulfillmentStatusParts(
+  order: any,
+  lineItemId: string | null | undefined,
+): Array<{ status: LineFulfillmentStatus; quantity: number }> {
+  const buckets = new Map<LineFulfillmentStatus, number>();
+  const fulfillmentOrders = order?.fulfillmentOrders?.nodes || [];
+
+  for (const fulfillmentOrder of fulfillmentOrders) {
+    const status = fulfillmentOrderStatus(fulfillmentOrder?.status);
+
+    if (!status) continue;
+
+    for (const line of fulfillmentOrder?.lineItems?.nodes || []) {
+      if (lineItemId && line?.lineItem?.id !== lineItemId) continue;
+
+      const remaining = Number(line?.remainingQuantity ?? 0);
+
+      if (remaining > 0) {
+        buckets.set(status, (buckets.get(status) ?? 0) + remaining);
+      }
+    }
+  }
+
+  return [...buckets.entries()].map(([status, quantity]) => ({
+    status,
+    quantity,
+  }));
+}
+
+export function splitCountsByFulfillmentStatus(
+  order: any,
+  lineItemId: string | null | undefined,
+  totals: number[],
+): Array<{ status: LineFulfillmentStatus; quantities: number[] }> {
+  const parts = lineFulfillmentStatusParts(order, lineItemId);
+  const fallback = orderLineFulfillmentStatus(order);
+  const statuses =
+    parts.length > 0 ? parts : [{ status: fallback, quantity: 1 }];
+
+  if (statuses.length === 1) {
+    return [{ status: statuses[0].status, quantities: totals }];
+  }
+
+  const weight = statuses.reduce((sum, part) => sum + part.quantity, 0);
+
+  if (weight <= 0) {
+    return [{ status: fallback, quantities: totals }];
+  }
+
+  const assigned = totals.map(() => 0);
+
+  return statuses
+    .map((part, index) => {
+      const quantities = totals.map((total, totalIndex) => {
+        if (!(total > 0)) return 0;
+
+        const quantity =
+          index === statuses.length - 1
+            ? total - assigned[totalIndex]
+            : Math.floor((part.quantity / weight) * total);
+
+        if (index !== statuses.length - 1) {
+          assigned[totalIndex] += quantity;
+        }
+
+        return quantity;
+      });
+
+      return { status: part.status, quantities };
+    })
+    .filter((part) => part.quantities.some((quantity) => quantity > 0));
+}
+
+export function splitQuantityByFulfillmentStatus(
+  order: any,
+  lineItemId: string | null | undefined,
+  total: number,
+): Array<{ status: LineFulfillmentStatus; quantity: number }> {
+  if (!(total > 0)) return [];
+
+  return splitCountsByFulfillmentStatus(order, lineItemId, [total])
+    .map((part) => ({
+      status: part.status,
+      quantity: part.quantities[0] ?? 0,
+    }))
+    .filter((part) => part.quantity > 0);
+}
+
 export function orderStatusLabel(order: any) {
   if (orderIsPickup(order)) {
     return "Pick up";

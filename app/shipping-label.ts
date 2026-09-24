@@ -19,6 +19,7 @@ export type ShippingLabelItem = {
   name: string;
   quantity: number;
   imageUrl: string;
+  fulfillmentStatus: string;
 };
 
 export type ShippingLabelOrder = {

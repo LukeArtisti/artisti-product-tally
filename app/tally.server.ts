@@ -1,4 +1,7 @@
-import { orderSalesChannelLabel } from "./order-filters";
+import {
+  orderSalesChannelLabel,
+  splitCountsByFulfillmentStatus,
+} from "./order-filters";
 import {
   customCoffeeSort,
   parseCoffeePackSize,
@@ -9,6 +12,7 @@ import {
 export type { TallyItem } from "./tally";
 
 type LineItemNode = {
+  id?: string | null;
   title?: string | null;
   name?: string | null;
   quantity?: number | null;
@@ -42,6 +46,18 @@ function asLineItemList(lineItems: any): LineItemNode[] | null {
 }
 
 type OrderNode = {
+  displayFulfillmentStatus?: string | null;
+  fulfillmentOrders?: {
+    nodes?: Array<{
+      status?: string | null;
+      lineItems?: {
+        nodes?: Array<{
+          remainingQuantity?: number | null;
+          lineItem?: { id?: string | null } | null;
+        } | null> | null;
+      } | null;
+    } | null> | null;
+  } | null;
   lineItems?: {
     nodes?: Array<LineItemNode | null> | null;
   } | null;
@@ -54,6 +70,7 @@ type GroupedCount = {
   vendor: string;
   variants: string[];
   salesChannel: string;
+  fulfillmentStatus: string;
   bagCount: number;
   unitGrams: number;
   sizeLabel: string;
@@ -179,13 +196,14 @@ function addToGroup(
   sku: string,
   variantTitle: string,
   salesChannel: string,
+  fulfillmentStatus: string,
   bagCount: number,
   unitGrams: number,
   sizeLabel: string,
   kind?: MachineOrGrinderKind,
   vendor = "",
 ) {
-  const groupItemKey = `${displayTitle}\u0001${salesChannel}`;
+  const groupItemKey = `${displayTitle}\u0001${salesChannel}\u0001${fulfillmentStatus}`;
   const existing = groupedTally[groupKey][groupItemKey];
   const variant = variantLabel(variantTitle);
 
@@ -208,6 +226,7 @@ function addToGroup(
     vendor,
     variants: variant ? [variant] : [],
     salesChannel,
+    fulfillmentStatus,
     bagCount,
     unitGrams,
     sizeLabel,
@@ -222,12 +241,19 @@ function toTallyItem(row: GroupedCount): TallyItem {
     variant: row.variants.join(", "),
     vendor: row.vendor,
     salesChannel: row.salesChannel,
+    fulfillmentStatus: row.fulfillmentStatus,
     quantity: row.count,
     bagCount: row.bagCount,
     unitGrams: row.unitGrams,
     sizeLabel: row.sizeLabel,
     kind: row.kind,
   };
+}
+
+function fulfillmentStatusOrder(status: string) {
+  if (status === "Unfulfilled") return 0;
+  if (status === "On hold") return 1;
+  return 2;
 }
 
 function sortGroupedProducts(
@@ -237,6 +263,12 @@ function sortGroupedProducts(
     const titleComparison = a.title.localeCompare(b.title);
     if (titleComparison !== 0) {
       return titleComparison;
+    }
+    const statusComparison =
+      fulfillmentStatusOrder(a.fulfillmentStatus) -
+      fulfillmentStatusOrder(b.fulfillmentStatus);
+    if (statusComparison !== 0) {
+      return statusComparison;
     }
     return b.count - a.count;
   });
@@ -334,21 +366,34 @@ export function tallyOrders(orders: OrderNode[]): {
       }
 
       if (quantity > 0) {
-        addToGroup(
-          groupedTally,
-          groupKey,
-          displayTitle,
-          baseTitle,
+        const statusParts = splitCountsByFulfillmentStatus(order, item.id, [
           quantity,
-          sku,
-          variantTitle,
-          salesChannel,
           bagCount,
-          unitGrams,
-          sizeLabel,
-          equipmentKind ?? undefined,
-          item.product?.vendor?.trim() || "",
-        );
+        ]);
+
+        for (const part of statusParts) {
+          const partQuantity = part.quantities[0] ?? 0;
+          const partBagCount = part.quantities[1] ?? 0;
+
+          if (partQuantity <= 0) continue;
+
+          addToGroup(
+            groupedTally,
+            groupKey,
+            displayTitle,
+            baseTitle,
+            partQuantity,
+            sku,
+            variantTitle,
+            salesChannel,
+            part.status,
+            partBagCount,
+            unitGrams,
+            sizeLabel,
+            equipmentKind ?? undefined,
+            item.product?.vendor?.trim() || "",
+          );
+        }
       }
     }
   }
@@ -358,7 +403,14 @@ export function tallyOrders(orders: OrderNode[]): {
       title: key.split("\u0001")[0],
       ...data,
     }))
-    .sort(customCoffeeSort)
+    .sort((a, b) => {
+      const titleComparison = customCoffeeSort(a, b);
+      if (titleComparison !== 0) return titleComparison;
+      return (
+        fulfillmentStatusOrder(a.fulfillmentStatus) -
+        fulfillmentStatusOrder(b.fulfillmentStatus)
+      );
+    })
     .map((row) => toTallyItem(row));
 
   const machineGroupRows = Object.entries(
@@ -377,7 +429,10 @@ export function tallyOrders(orders: OrderNode[]): {
       if (kindA !== kindB) return kindA - kindB;
       const vendorComparison = (a.vendor || "").localeCompare(b.vendor || "");
       if (vendorComparison !== 0) return vendorComparison;
-      return a.title.localeCompare(b.title) || b.count - a.count;
+      return a.title.localeCompare(b.title) ||
+        fulfillmentStatusOrder(a.fulfillmentStatus) -
+          fulfillmentStatusOrder(b.fulfillmentStatus) ||
+        b.count - a.count;
     })
     .map((row) => toTallyItem(row));
 

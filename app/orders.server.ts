@@ -5,6 +5,7 @@ import {
   orderSalesChannelLabel,
   orderStatusLabel,
   pickFilterSalesChannels,
+  splitQuantityByFulfillmentStatus,
   type OrderStatusValue,
   type SalesChannelOption,
 } from "./order-filters";
@@ -494,6 +495,7 @@ export async function fetchAllOrders(
 
               lineItems(first: 250) {
                 nodes {
+                  id
                   title
                   name
                   quantity
@@ -553,6 +555,8 @@ export async function fetchAllOrders(
     hasNextPage = orderData.pageInfo.hasNextPage;
     after = orderData.pageInfo.endCursor;
   }
+
+  await attachFulfillmentOrders(admin, orders);
 
   return orders;
 }
@@ -971,6 +975,7 @@ const SHIPPING_LABEL_ORDER_FIELDS = `
   }
   lineItems(first: 100) {
     nodes {
+      id
       name
       title
       sku
@@ -1133,17 +1138,228 @@ export async function fetchShippingLabelOrders(
     after = orderData.pageInfo.endCursor;
   }
 
+  await attachFulfillmentOrders(admin, orders);
+
   return orders;
 }
 
-function shippingLabelItems(nodes: any[]): ShippingLabelItem[] {
-  const items = (nodes || []).map((item: any) => {
+const FULFILLMENT_ORDER_BATCH_SIZE = 1;
+
+async function adminGraphql(
+  admin: any,
+  query: string,
+  variables: Record<string, unknown>,
+) {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const response: any = await admin.graphql(query, { variables });
+    const data = await response.json();
+
+    if (data.errors) {
+      const throttled = data.errors.some(
+        (error: { extensions?: { code?: string } }) =>
+          error?.extensions?.code === "THROTTLED",
+      );
+
+      if (throttled && attempt < 3) {
+        await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
+        continue;
+      }
+
+      throw new Error(data.errors[0]?.message || "Shopify API error");
+    }
+
+    const available = Number(
+      data.extensions?.cost?.throttleStatus?.currentlyAvailable,
+    );
+    const restoreRate = Number(
+      data.extensions?.cost?.throttleStatus?.restoreRate || 50,
+    );
+
+    if (Number.isFinite(available) && available < 250 && restoreRate > 0) {
+      const waitMs = Math.ceil(((250 - available) / restoreRate) * 1000);
+      await new Promise((resolve) => setTimeout(resolve, Math.min(waitMs, 4000)));
+    }
+
+    return data.data;
+  }
+
+  throw new Error("Shopify API error");
+}
+
+async function collectFulfillmentLineItems(admin: any, fulfillmentOrder: any) {
+  const lines = [...(fulfillmentOrder?.lineItems?.nodes || [])];
+  let hasNextPage = Boolean(fulfillmentOrder?.lineItems?.pageInfo?.hasNextPage);
+  let after = fulfillmentOrder?.lineItems?.pageInfo?.endCursor || null;
+
+  while (hasNextPage && fulfillmentOrder?.id) {
+    const data = await adminGraphql(
+      admin,
+      `#graphql
+        query FulfillmentOrderLines($id: ID!, $after: String) {
+          fulfillmentOrder(id: $id) {
+            lineItems(first: 25, after: $after) {
+              pageInfo {
+                hasNextPage
+                endCursor
+              }
+              nodes {
+                remainingQuantity
+                lineItem {
+                  id
+                }
+              }
+            }
+          }
+        }`,
+      { id: fulfillmentOrder.id, after },
+    );
+    const connection = data?.fulfillmentOrder?.lineItems;
+    lines.push(...(connection?.nodes || []));
+    hasNextPage = Boolean(connection?.pageInfo?.hasNextPage);
+    after = connection?.pageInfo?.endCursor || null;
+  }
+
+  return lines;
+}
+
+async function collectFulfillmentOrders(admin: any, orderNode: any) {
+  const collected = [];
+  let connection = orderNode?.fulfillmentOrders;
+
+  while (connection) {
+    for (const fulfillmentOrder of connection.nodes || []) {
+      if (!fulfillmentOrder) continue;
+
+      collected.push({
+        status: fulfillmentOrder.status,
+        lineItems: {
+          nodes: await collectFulfillmentLineItems(admin, fulfillmentOrder),
+        },
+      });
+    }
+
+    if (!connection.pageInfo?.hasNextPage || !orderNode?.id) break;
+
+    const data = await adminGraphql(
+      admin,
+      `#graphql
+        query MoreFulfillmentOrders($id: ID!, $after: String) {
+          order(id: $id) {
+            fulfillmentOrders(first: 8, after: $after) {
+              pageInfo {
+                hasNextPage
+                endCursor
+              }
+              nodes {
+                id
+                status
+                lineItems(first: 25) {
+                  pageInfo {
+                    hasNextPage
+                    endCursor
+                  }
+                  nodes {
+                    remainingQuantity
+                    lineItem {
+                      id
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }`,
+      { id: orderNode.id, after: connection.pageInfo.endCursor },
+    );
+    connection = data?.order?.fulfillmentOrders;
+  }
+
+  return collected;
+}
+
+async function attachFulfillmentOrders(admin: any, orders: any[]) {
+  const ids = [
+    ...new Set(
+      orders
+        .map((order) => String(order?.id || ""))
+        .filter(Boolean),
+    ),
+  ];
+
+  if (ids.length === 0) return;
+
+  const byOrderId = new Map<string, any[]>();
+
+  for (let index = 0; index < ids.length; index += FULFILLMENT_ORDER_BATCH_SIZE) {
+    const batch = ids.slice(index, index + FULFILLMENT_ORDER_BATCH_SIZE);
+    const data = await adminGraphql(
+      admin,
+      `#graphql
+        query OrderFulfillmentOrders($ids: [ID!]!) {
+          nodes(ids: $ids) {
+            ... on Order {
+              id
+              fulfillmentOrders(first: 8) {
+                pageInfo {
+                  hasNextPage
+                  endCursor
+                }
+                nodes {
+                  id
+                  status
+                  lineItems(first: 25) {
+                    pageInfo {
+                      hasNextPage
+                      endCursor
+                    }
+                    nodes {
+                      remainingQuantity
+                      lineItem {
+                        id
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }`,
+      { ids: batch },
+    );
+
+    for (const node of data?.nodes || []) {
+      if (!node?.id) continue;
+      byOrderId.set(node.id, await collectFulfillmentOrders(admin, node));
+    }
+  }
+
+  for (const order of orders) {
+    const nodes = byOrderId.get(order.id);
+
+    if (nodes) {
+      order.fulfillmentOrders = { nodes };
+    }
+  }
+}
+
+function shippingLabelItems(order: any): ShippingLabelItem[] {
+  type SlipLine = {
+    id: string;
+    sku: string;
+    name: string;
+    quantity: number;
+    unfulfilledQuantity: number;
+    imageUrl: string;
+  };
+
+  const items: SlipLine[] = (order?.lineItems?.nodes || []).map((item: any) => {
     const orderedQuantity = Number(item?.currentQuantity ?? item?.quantity ?? 0);
     const unfulfilledQuantity = Number(item?.unfulfilledQuantity);
     const variantTitle = String(item?.variantTitle || "").trim();
     const title = String(item?.name || item?.title || "").trim();
 
     return {
+      id: String(item?.id || ""),
       sku: String(item?.sku || "").trim(),
       name:
         title.includes(variantTitle) || !variantTitle
@@ -1157,27 +1373,26 @@ function shippingLabelItems(nodes: any[]): ShippingLabelItem[] {
     };
   });
 
-  const unfulfilledItems = items
-    .filter((item) => item.unfulfilledQuantity > 0)
-    .map((item) => ({
-      sku: item.sku,
-      name: item.name,
-      quantity: item.unfulfilledQuantity,
-      imageUrl: item.imageUrl,
-    }));
+  const unfulfilledItems = items.filter((item) => item.unfulfilledQuantity > 0);
+  const visibleItems =
+    unfulfilledItems.length > 0
+      ? unfulfilledItems.map((item) => ({
+          ...item,
+          quantity: item.unfulfilledQuantity,
+        }))
+      : items.filter((item) => item.quantity > 0);
 
-  if (unfulfilledItems.length > 0) {
-    return unfulfilledItems;
-  }
-
-  return items
-    .filter((item) => item.quantity > 0)
-    .map((item) => ({
-      sku: item.sku,
-      name: item.name,
-      quantity: item.quantity,
-      imageUrl: item.imageUrl,
-    }));
+  return visibleItems.flatMap((item) =>
+    splitQuantityByFulfillmentStatus(order, item.id, item.quantity).map(
+      (part) => ({
+        sku: item.sku,
+        name: item.name,
+        quantity: part.quantity,
+        imageUrl: item.imageUrl,
+        fulfillmentStatus: part.status,
+      }),
+    ),
+  );
 }
 
 export function toShippingLabelOrder(order: any): ShippingLabelOrder {
@@ -1218,6 +1433,6 @@ export function toShippingLabelOrder(order: any): ShippingLabelOrder {
     shippingCityLine: formatCityLine(shippingAddress),
     shippingCountry: String(shippingAddress?.country || "").trim(),
     shippingMethod: String(order?.shippingLines?.nodes?.[0]?.title || "").trim(),
-    items: shippingLabelItems(order?.lineItems?.nodes || []),
+    items: shippingLabelItems(order),
   };
 }
