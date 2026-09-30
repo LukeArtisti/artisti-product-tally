@@ -74,6 +74,16 @@ type ShippingLabelsResponse = {
   orders?: ShippingLabelOrder[];
 };
 
+const QUICK_SELECTS = [
+  "today",
+  "yesterday",
+  "last7",
+  "last30",
+  "thisMonth",
+] as const;
+
+type QuickSelectType = (typeof QUICK_SELECTS)[number];
+
 function formatYmdInTimeZone(date: Date, timeZone: string) {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone,
@@ -97,6 +107,13 @@ function shiftYmd(dateStr: string, days: number) {
     String(shifted.getUTCMonth() + 1).padStart(2, "0"),
     String(shifted.getUTCDate()).padStart(2, "0"),
   ].join("-");
+}
+
+function endOfMonthYmd(dateStr: string) {
+  const [year, month] = dateStr.split("-").map(Number);
+  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+
+  return `${year}-${String(month).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`;
 }
 
 function formatTimezoneLabel(shop: Pick<ShopTimezone, "timezoneAbbreviation" | "timezoneOffset">) {
@@ -792,6 +809,8 @@ type PackingPrintSheet = {
   totalLabel: string;
   totalValue: number;
   grindSummary?: CoffeeGrindSummary[];
+  checkColumns?: string[];
+  blankColumns?: string[];
 };
 
 function grindSummaryPrintHtml(summaries: CoffeeGrindSummary[]) {
@@ -838,6 +857,20 @@ function buildPackingSheetPrintHtml(title: string, rangeText: string, sheets: Pa
         });
       }
 
+      const checkColumns = sheet.checkColumns ?? [];
+      const blankColumns = sheet.blankColumns ?? [];
+      const checkHeaderCells = checkColumns
+        .map((label) => `<th class="check">${escapeHtml(label)}</th>`)
+        .join("");
+      const blankHeaderCells = blankColumns
+        .map((label) => `<th class="check">${escapeHtml(label)}</th>`)
+        .join("");
+      const checkBodyCells = checkColumns
+        .map(() => `<td class="check"><span class="tick-box"></span></td>`)
+        .join("");
+      const blankBodyCells = blankColumns
+        .map(() => `<td class="check"></td>`)
+        .join("");
       const headerCells = sheet.headers
         .map((header, index) => {
           const numeric =
@@ -854,7 +887,7 @@ function buildPackingSheetPrintHtml(title: string, rangeText: string, sheets: Pa
                 const text = isNumber ? String(cell) : escapeHtml(String(cell ?? ""));
                 return `<td${isNumber || index === row.length - 1 ? ' class="num"' : ""}>${text}</td>`;
               })
-              .join("")}</tr>`,
+              .join("")}${checkBodyCells}${blankBodyCells}</tr>`,
         )
         .join("");
 
@@ -864,7 +897,7 @@ function buildPackingSheetPrintHtml(title: string, rangeText: string, sheets: Pa
       ${sheet.subheading ? `<h2>${escapeHtml(sheet.subheading)}</h2>` : ""}
       ${sheet.grindSummary ? grindSummaryPrintHtml(sheet.grindSummary) : ""}
       <table class="products">
-        <thead><tr>${headerCells}</tr></thead>
+        <thead><tr>${headerCells}${checkHeaderCells}${blankHeaderCells}</tr></thead>
         <tbody>${bodyRows}</tbody>
       </table>
       <div class="total">
@@ -919,6 +952,9 @@ function buildPackingSheetPrintHtml(title: string, rangeText: string, sheets: Pa
       table.products td {
         white-space: normal;
       }
+      table.products th {
+        vertical-align: bottom;
+      }
       th, td {
         padding: 6px 18px 6px 0;
         text-align: left;
@@ -929,7 +965,27 @@ function buildPackingSheetPrintHtml(title: string, rangeText: string, sheets: Pa
       th.num, td.num {
         text-align: right;
       }
-      th:last-child, td:last-child {
+      table.products th.check,
+      table.products td.check {
+        width: 1%;
+        min-width: 76px;
+        padding: 6px 12px;
+        text-align: center;
+        white-space: nowrap;
+        vertical-align: bottom;
+      }
+      table.products td.check {
+        vertical-align: middle;
+      }
+      .tick-box {
+        display: inline-block;
+        width: 16px;
+        height: 16px;
+        border: 1.5px solid #111;
+        vertical-align: middle;
+      }
+      th:last-child:not(.check),
+      td:last-child:not(.check) {
         padding-right: 0;
       }
       h3 {
@@ -1268,6 +1324,8 @@ export default function Index() {
   const [orderStatuses, setOrderStatuses] = useState<OrderStatusValue[]>(
     loadedSaved?.orderStatuses ?? ["open"],
   );
+  const [pinnedQuickSelect, setPinnedQuickSelect] =
+    useState<QuickSelectType | null>(null);
   const [salesChannelIds, setSalesChannelIds] = useState<string[]>(
     loadedSaved?.salesChannelIds ?? ["all"],
   );
@@ -1305,7 +1363,7 @@ export default function Index() {
     });
   };
 
-  const getQuickSelectRange = (type: string) => {
+  const getQuickSelectRange = (type: QuickSelectType) => {
     const today = formatYmdInTimeZone(new Date(), ianaTimezone);
 
     if (type === "today") {
@@ -1334,7 +1392,7 @@ export default function Index() {
 
     if (type === "last30") {
       return {
-        fromDate: shiftYmd(today, -29),
+        fromDate: shiftYmd(today, -30),
         toDate: today,
         fromTime: "00:00",
         toTime: "23:59",
@@ -1344,7 +1402,7 @@ export default function Index() {
     if (type === "thisMonth") {
       return {
         fromDate: `${today.slice(0, 8)}01`,
-        toDate: today,
+        toDate: endOfMonthYmd(today),
         fromTime: "00:00",
         toTime: "23:59",
       };
@@ -1353,11 +1411,12 @@ export default function Index() {
     return null;
   };
 
-  const handleQuickSelect = (type: string) => {
+  const handleQuickSelect = (type: QuickSelectType) => {
     const range = getQuickSelectRange(type);
 
     if (!range) return;
 
+    setPinnedQuickSelect(type);
     setFromDate(range.fromDate);
     setFromTime(range.fromTime);
     setToDate(range.toDate);
@@ -1373,19 +1432,22 @@ export default function Index() {
     setExcludedOrderIds(new Set());
   }, [fromDate, fromTime, toDate, toTime, orderStatuses, salesChannelIds]);
 
-  const activeQuickSelect = (
-    ["today", "yesterday", "last7", "last30", "thisMonth"] as const
-  ).find((type) => {
+  const quickSelectMatches = (type: QuickSelectType) => {
     const range = getQuickSelectRange(type);
 
     return (
-      range &&
+      !!range &&
       range.fromDate === fromDate &&
       range.fromTime === fromTime &&
       range.toDate === toDate &&
       range.toTime === toTime
     );
-  });
+  };
+
+  const activeQuickSelect =
+    pinnedQuickSelect && quickSelectMatches(pinnedQuickSelect)
+      ? pinnedQuickSelect
+      : QUICK_SELECTS.find(quickSelectMatches);
 
   const currentParams = (): TallySaveParams => ({
     fromDate,
@@ -1418,6 +1480,7 @@ export default function Index() {
 
   const applySavedTally = (saved: TallySaveParams) => {
     skipExcludeResetRef.current = true;
+    setPinnedQuickSelect(null);
     setFromDate(saved.fromDate);
     setFromTime(saved.fromTime);
     setToDate(saved.toDate);
@@ -1662,6 +1725,8 @@ export default function Index() {
           ]),
           totalLabel: "Total Machine and Grinder Items",
           totalValue: totalMachineItems,
+          checkColumns: ["Picked"],
+          blankColumns: ["Picked by"],
         },
       ]),
     );
@@ -1694,6 +1759,8 @@ export default function Index() {
       ]),
       totalLabel: "Total Accessory Items",
       totalValue: items.reduce((sum, item) => sum + item.quantity, 0),
+      checkColumns: ["Picked"],
+      blankColumns: ["Picked by"],
     }));
 
     printHtmlDocument(
