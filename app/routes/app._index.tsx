@@ -979,8 +979,8 @@ function buildPackingSheetPrintHtml(title: string, rangeText: string, sheets: Pa
       }
       .tick-box {
         display: inline-block;
-        width: 16px;
-        height: 16px;
+        width: 25px;
+        height: 25px;
         border: 1.5px solid #111;
         vertical-align: middle;
       }
@@ -1106,8 +1106,8 @@ function buildShippingLabelPrintHtml(
       .item-table .check-cell { text-align: center; }
       .tick-box {
         display: inline-block;
-        width: 16px;
-        height: 16px;
+        width: 25px;
+        height: 25px;
         border: 1.5px solid #111;
         vertical-align: middle;
       }
