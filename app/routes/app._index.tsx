@@ -951,14 +951,12 @@ function buildPackingSheetPrintHtml(title: string, rangeText: string, sheets: Pa
       table.products th,
       table.products td {
         white-space: normal;
-      }
-      table.products th {
-        vertical-align: bottom;
+        vertical-align: middle;
       }
       th, td {
         padding: 6px 18px 6px 0;
         text-align: left;
-        vertical-align: top;
+        vertical-align: middle;
         white-space: nowrap;
         border-bottom: 1px solid #ddd;
       }
@@ -972,9 +970,6 @@ function buildPackingSheetPrintHtml(title: string, rangeText: string, sheets: Pa
         padding: 6px 12px;
         text-align: center;
         white-space: nowrap;
-        vertical-align: bottom;
-      }
-      table.products td.check {
         vertical-align: middle;
       }
       .tick-box {
